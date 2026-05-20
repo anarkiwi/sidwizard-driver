@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sidwizard-driver"
+version = "0.1.0"
+description = "Python automation framework for driving SID-Wizard inside asid-vice via the binary monitor — captures per-frame SID register writes for verifying pysidwizard's player."
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "anarkiwi" },
+]
+keywords = [
+    "c64",
+    "commodore-64",
+    "sid-wizard",
+    "sidwizard",
+    "vice",
+    "asid-vice",
+    "sid",
+    "music",
+    "emulator",
+    "automation",
+    "binary-monitor",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Emulators",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "pyright>=1.1.350",
+]
+
+[project.urls]
+Homepage = "https://github.com/anarkiwi/sidwizard-driver"
+Issues = "https://github.com/anarkiwi/sidwizard-driver/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sidwizard_driver*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["-ra", "--strict-markers"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+ignore = [
+    "E501",
+    "E741",
+    "B008",
+]
