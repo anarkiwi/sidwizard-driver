@@ -38,7 +38,7 @@ import struct
 import time
 from typing import Optional
 
-from vice_driver import BinMon, KEY, lookup, parse_screen_response, text_to_chords
+from vice_driver import KEY, BinMon, lookup, parse_screen_response, text_to_chords
 from vice_driver.binmon import TAP_MODE_FIXED
 from vice_driver.expect import Expect, verify
 
@@ -116,7 +116,9 @@ class Sidwizard:
     # `discover_tuneheader()` byte scan — it only matches once the
     # editor PRG has been loaded into RAM.
 
-    def wait_for_startup_menu(self, timeout: float = 30.0, poll_interval: float = 0.5) -> None:
+    def wait_for_startup_menu(  # pragma: no cover - requires live VICE
+        self, timeout: float = 30.0, poll_interval: float = 0.5
+    ) -> None:
         """Block until the SID-Wizard bootloader's startup-menu screen
         is visible. Used after autostart, before tapping RETURN to
         select a player."""
@@ -127,18 +129,18 @@ class Sidwizard:
                 log.info("SID-Wizard startup menu visible")
                 return
             time.sleep(poll_interval)
-        raise SidwizardError(
-            f"timed out after {timeout:.0f}s waiting for SID-Wizard startup menu"
-        )
+        raise SidwizardError(f"timed out after {timeout:.0f}s waiting for SID-Wizard startup menu")
 
-    def dismiss_startup_menu(self) -> None:
+    def dismiss_startup_menu(self) -> None:  # pragma: no cover - requires live VICE
         """Tap RETURN to confirm the default player selection and load
         the editor PRG. Idempotent in the sense that pressing RETURN on
         the editor screen is also harmless (RETURN is the pattern-row
         commit key in the editor)."""
         self._tap([KEY.RETURN])
 
-    def wait_for_editor(self, timeout: float = 30.0, poll_interval: float = 0.5) -> int:
+    def wait_for_editor(  # pragma: no cover - requires live VICE
+        self, timeout: float = 30.0, poll_interval: float = 0.5
+    ) -> int:
         """Block until the editor PRG is loaded into RAM and the
         ``loadtun`` byte signature can be found. Returns the discovered
         ``TUNEHEADER`` address."""
@@ -157,7 +159,9 @@ class Sidwizard:
             f" (last signature error: {last_err})"
         )
 
-    def wait_for_idle(self, timeout: float = 60.0, poll_interval: float = 0.5) -> int:
+    def wait_for_idle(  # pragma: no cover - requires live VICE
+        self, timeout: float = 60.0, poll_interval: float = 0.5
+    ) -> int:
         """Drive the bootloader through to the live editor.
 
         Equivalent to: wait_for_startup_menu → dismiss_startup_menu →
@@ -207,10 +211,7 @@ class Sidwizard:
         # points at SWM1 magic bytes. The editor's init code writes
         # "SWM1" to TUNEHEADER+0 as part of the empty-tune setup, so
         # the right candidate is the one whose first 4 bytes match.
-        valid = [
-            addr for addr in unique
-            if self.bm.mem_get(addr, addr + 3) == SWM_MAGIC
-        ]
+        valid = [addr for addr in unique if self.bm.mem_get(addr, addr + 3) == SWM_MAGIC]
         if len(valid) == 1:
             return valid[0]
         if not valid:
@@ -226,7 +227,9 @@ class Sidwizard:
 
     # ---- side load --------------------------------------------------
 
-    def side_load_swm(self, swm_path: str, tuneheader: int) -> int:
+    def side_load_swm(  # pragma: no cover - requires live VICE
+        self, swm_path: str, tuneheader: int
+    ) -> int:
         """Write the packed ``.swm`` payload to ``tuneheader``.
 
         Strips the standard 2-byte PRG header (``$1FF8`` little-endian
@@ -259,7 +262,7 @@ class Sidwizard:
 
     # ---- play -------------------------------------------------------
 
-    def play(self, hold_frames: int = 3) -> None:
+    def play(self, hold_frames: int = 3) -> None:  # pragma: no cover - requires live VICE
         """Tap F1 (reset + play whole tune from beginning).
 
         ``hold_frames`` is the matrix-hold duration; the default of 3
@@ -268,7 +271,7 @@ class Sidwizard:
         """
         self.bm.keymatrix_tap([(KEY.F1[0], KEY.F1[1])], frames=hold_frames)
 
-    def stop(self, hold_frames: int = 3) -> None:
+    def stop(self, hold_frames: int = 3) -> None:  # pragma: no cover - requires live VICE
         """Tap F4 (stop / pause). Convenience for tearing down a capture."""
         # F4 is shift+F3 on the physical C64 matrix, but SID-Wizard
         # accepts the F4 alias (row 0 col 5 + LSHIFT). For a clean
@@ -292,7 +295,9 @@ class Sidwizard:
     #   6. tap RETURN → load runs through KERNAL.LOAD → depackt
     #   7. wait for the load + in-place depack to finish
 
-    def _tap(self, keys: list[tuple[int, int]], frames: int = 8, settle: float = 0.2) -> None:
+    def _tap(  # pragma: no cover - requires live VICE
+        self, keys: list[tuple[int, int]], frames: int = 8, settle: float = 0.2
+    ) -> None:
         """Tap a chord and pause long enough for the editor's IRQ
         scanner to observe the press AND the subsequent release."""
         self.bm.keymatrix_tap(keys, mode=TAP_MODE_FIXED, frames=frames)
@@ -300,7 +305,9 @@ class Sidwizard:
         # duration + editor reaction; settle adds a safety margin.
         time.sleep(frames * 0.02 + settle)
 
-    def attach_swm_disk(self, swm_path: str, host_d64_path: str, container_d64_path: str) -> None:
+    def attach_swm_disk(  # pragma: no cover - requires live VICE
+        self, swm_path: str, host_d64_path: str, container_d64_path: str
+    ) -> None:
         """Build a fresh single-file .d64 holding ``swm_path`` and attach
         it to drive 8. ``host_d64_path`` is where the file is written on
         the host; ``container_d64_path`` is the same path as seen inside
@@ -312,7 +319,7 @@ class Sidwizard:
         write_d64_with_swm(host_d64_path, swm_path)
         self.bm.attach_drive(container_d64_path, unit=8, drive=0)
 
-    def enter_load_menu(self) -> None:
+    def enter_load_menu(self) -> None:  # pragma: no cover - requires live VICE
         """Open SID-Wizard's menu, navigate to loadtun, confirm.
 
         Sequence: SHIFT+F7 (menu) → CRSRDOWN (loadtun is below savetun)
@@ -323,7 +330,7 @@ class Sidwizard:
         self._tap([KEY.CRSRUD])  # CRSRUD without SHIFT = "down"
         self._tap([KEY.RETURN])
 
-    def type_filename(self, name: str) -> None:
+    def type_filename(self, name: str) -> None:  # pragma: no cover - requires live VICE
         """Type ``name`` into the file dialog one chord at a time.
 
         Letters are upper-cased and sent via matrix taps; SID-Wizard's
@@ -335,7 +342,7 @@ class Sidwizard:
             keys = [lookup(n) for n in chord]
             self._tap(keys)
 
-    def load_swm_via_menu(
+    def load_swm_via_menu(  # pragma: no cover - requires live VICE
         self,
         swm_path: str,
         host_d64_path: str,
@@ -370,8 +377,7 @@ class Sidwizard:
         # Snapshot the byte we'll watch BEFORE the load runs.
         watch_addr = tuneheader + TUNEHEADER_AUTHOR_OFFSET
         pre_byte = self.bm.mem_get(watch_addr, watch_addr)[0]
-        log.debug("pre-load TUNEHEADER+$%02X = $%02X",
-                  TUNEHEADER_AUTHOR_OFFSET, pre_byte)
+        log.debug("pre-load TUNEHEADER+$%02X = $%02X", TUNEHEADER_AUTHOR_OFFSET, pre_byte)
 
         log.info("entering load menu...")
         self.enter_load_menu()
@@ -382,10 +388,12 @@ class Sidwizard:
 
         ok, observed = verify(
             self.bm,
-            Expect(addr=watch_addr,
-                   want=lambda b, p=pre_byte: b != p,
-                   timeout=load_timeout,
-                   poll_interval=0.1),
+            Expect(
+                addr=watch_addr,
+                want=lambda b, p=pre_byte: b != p,
+                timeout=load_timeout,
+                poll_interval=0.1,
+            ),
         )
         if not ok:
             raise SidwizardError(
@@ -397,7 +405,7 @@ class Sidwizard:
 
     # ---- cycle-counter wait -----------------------------------------
 
-    def cycle(self) -> int:
+    def cycle(self) -> int:  # pragma: no cover - requires live VICE
         """Return the absolute CPU cycle counter from the most recent
         ``cpuhistory`` entry."""
         history = self.bm.cpuhistory_get(count=1)
@@ -405,7 +413,7 @@ class Sidwizard:
             raise SidwizardError("cpuhistory_get returned empty list")
         return history[0].cycle
 
-    def wait_for_cycles(
+    def wait_for_cycles(  # pragma: no cover - requires live VICE
         self,
         cycle_count: int,
         timeout: float = 120.0,

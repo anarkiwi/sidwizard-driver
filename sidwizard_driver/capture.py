@@ -62,16 +62,21 @@ def _read_swm_framespeed(swm_path: str) -> int:
         raise ValueError(f"{swm_path}: unreasonable framespeed value {fs}")
     return fs
 
+
 log = logging.getLogger("sidwizard_driver.capture")
 
 
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:  # pragma: no cover - CLI glue
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--d64", help="SID-Wizard editor .d64 (required unless --dump-only)")
     p.add_argument("--swm", help="SWM module to play (required unless --smoke or --dump-only)")
     p.add_argument("--frames", type=int, default=1500, help="number of PAL frames to capture")
     p.add_argument("--out", required=True, help="output CSV path")
-    p.add_argument("--smoke", action="store_true", help="skip SWM load; capture the default editor state")
+    p.add_argument(
+        "--smoke",
+        action="store_true",
+        help="skip SWM load; capture the default editor state",
+    )
     p.add_argument(
         "--dump-only",
         metavar="PATH",
@@ -85,20 +90,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--image", default="asid-vice:latest")
     p.add_argument("--port", type=int, default=6502)
     p.add_argument("--idle-timeout", type=float, default=60.0)
-    p.add_argument("--load-timeout", type=float, default=10.0,
-                   help="seconds to wait for TUNEHEADER author byte to change after the RETURN that triggers loadtun")
-    p.add_argument("--capture-timeout", type=float, default=120.0,
-                   help="wall-clock cap on the cycle-counter wait for --frames frames")
+    p.add_argument(
+        "--load-timeout",
+        type=float,
+        default=10.0,
+        help="seconds to wait for TUNEHEADER author byte to change after the RETURN that triggers loadtun",
+    )
+    p.add_argument(
+        "--capture-timeout",
+        type=float,
+        default=120.0,
+        help="wall-clock cap on the cycle-counter wait for --frames frames",
+    )
     p.add_argument("-v", "--verbose", action="count", default=0)
     return p.parse_args(argv)
 
 
-def _decode_to_csv(dump_path: str, out_path: str, dedup: bool) -> int:
+def _decode_to_csv(
+    dump_path: str, out_path: str, dedup: bool
+) -> int:  # pragma: no cover - CLI glue
     with open(out_path, "w", newline="") as fp:
         return decode_dump_file(dump_path, fp, dedup=dedup)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry point
     args = _parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose >= 2 else logging.INFO,
@@ -123,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     return _run_live(args)
 
 
-def _run_live(args: argparse.Namespace) -> int:
+def _run_live(args: argparse.Namespace) -> int:  # pragma: no cover - requires live VICE
     if not os.path.isfile(args.d64):
         print(f"not a file: {args.d64}", file=sys.stderr)
         return 2
@@ -199,13 +214,21 @@ def _run_live(args: argparse.Namespace) -> int:
                 # actually run for `frames` player frames. The
                 # start_cycle gives us the anchor for frame-zero
                 # alignment in the CSV downstream.
-                log.info("waiting for %d cycles (%d player frames @ framespeed=%d) since F1...",
-                         target_cycles, args.frames, framespeed)
+                log.info(
+                    "waiting for %d cycles (%d player frames @ framespeed=%d) since F1...",
+                    target_cycles,
+                    args.frames,
+                    framespeed,
+                )
                 start_cycle, end_cycle = sw.wait_for_cycles(
                     target_cycles, timeout=args.capture_timeout
                 )
-                log.info("captured %d cycles (start=%d, end=%d)",
-                         end_cycle - start_cycle, start_cycle, end_cycle)
+                log.info(
+                    "captured %d cycles (start=%d, end=%d)",
+                    end_cycle - start_cycle,
+                    start_cycle,
+                    end_cycle,
+                )
     except ViceContainerError as e:
         print(f"VICE container error: {e}", file=sys.stderr)
         return 4
@@ -217,10 +240,16 @@ def _run_live(args: argparse.Namespace) -> int:
         print(f"no dump file produced at {host_dump}", file=sys.stderr)
         return 6
 
-    log.info("decoding %s -> %s (frame 0 anchored at cycle %d; "
-             "framespeed=%d, cycles/frame=%d; cap = %d frames)",
-             host_dump, args.out, start_cycle, framespeed,
-             cycles_per_frame, args.frames)
+    log.info(
+        "decoding %s -> %s (frame 0 anchored at cycle %d; "
+        "framespeed=%d, cycles/frame=%d; cap = %d frames)",
+        host_dump,
+        args.out,
+        start_cycle,
+        framespeed,
+        cycles_per_frame,
+        args.frames,
+    )
     with open(args.out, "w", newline="") as fp:
         n = decode_dump_file(
             host_dump,

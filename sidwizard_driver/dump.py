@@ -191,6 +191,7 @@ def decode_dump_file(
     dropped. Useful for capping a capture to exactly N frames despite
     VICE continuing to write during container shutdown.
     """
+
     def _drop_negative(rows):
         for frame, reg, value in rows:
             if frame >= 0:
@@ -205,7 +206,9 @@ def decode_dump_file(
     with open(path) as fp:
         records = iter_records(fp)
         records = filter_sid(records, chipno=chipno)
-        rows = quantise_to_frames(records, cycles_per_frame=cycles_per_frame, start_cycle=start_cycle)
+        rows = quantise_to_frames(
+            records, cycles_per_frame=cycles_per_frame, start_cycle=start_cycle
+        )
         if drop_pre_anchor and start_cycle > 0:
             rows = _drop_negative(rows)
         if max_frame is not None:

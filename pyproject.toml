@@ -48,6 +48,7 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.4",
     "pyright>=1.1.350",
+    "black>=24.0",
 ]
 
 [project.urls]
@@ -75,3 +76,27 @@ ignore = [
     "E741",
     "B008",
 ]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.coverage.run]
+branch = true
+source = ["sidwizard_driver"]
+omit = [
+    # Smoke is an integration entry point that boots the VICE container.
+    # It has no unit-testable surface; the meaningful coverage on the
+    # rest of the driver is measured against the testable modules.
+    "sidwizard_driver/smoke.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false

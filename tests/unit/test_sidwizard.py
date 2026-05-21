@@ -92,8 +92,17 @@ def test_discover_tuneheader_disambiguates_by_swm_magic():
     # Add a decoy at a different address (e.g. loadins's call site).
     decoy_addr = 0xA480
     decoy_sig = bytes(
-        [0xA2, decoy_addr & 0xFF, 0xA0, (decoy_addr >> 8) & 0xFF,
-         0xA9, 0x00, 0x20, 0xD5, 0xFF]
+        [
+            0xA2,
+            decoy_addr & 0xFF,
+            0xA0,
+            (decoy_addr >> 8) & 0xFF,
+            0xA9,
+            0x00,
+            0x20,
+            0xD5,
+            0xFF,
+        ]
     )
     base[0x2222 : 0x2222 + len(decoy_sig)] = decoy_sig
 
