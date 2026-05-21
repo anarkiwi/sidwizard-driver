@@ -18,9 +18,9 @@ import logging
 import os
 import sys
 
-from .binmon import BinMon
+from vice_driver import BinMon, DiskMount, ViceContainer, ViceContainerError
+
 from .sidwizard import Sidwizard, SidwizardError
-from .vice_docker import DiskMount, ViceContainer, ViceContainerError
 
 log = logging.getLogger("sidwizard_driver.smoke")
 

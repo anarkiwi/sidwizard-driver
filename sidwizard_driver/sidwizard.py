@@ -38,10 +38,10 @@ import struct
 import time
 from typing import Optional
 
-from .binmon import TAP_MODE_FIXED, BinMon
+from vice_driver import BinMon, KEY, lookup, parse_screen_response, text_to_chords
+from vice_driver.binmon import TAP_MODE_FIXED
+
 from .d64 import write_d64_with_swm
-from .keys import KEY, lookup, text_to_chords
-from .screen import parse_screen_response
 
 log = logging.getLogger(__name__)
 

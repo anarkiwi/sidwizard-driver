@@ -35,10 +35,10 @@ import sys
 import tempfile
 import time
 
-from .binmon import BinMon
+from vice_driver import BinMon, DiskMount, ViceContainer, ViceContainerError
+
 from .dump import PAL_CYCLES_PER_FRAME, decode_dump_file
 from .sidwizard import Sidwizard, SidwizardError
-from .vice_docker import DiskMount, ViceContainer, ViceContainerError
 
 log = logging.getLogger("sidwizard_driver.capture")
 

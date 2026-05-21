@@ -38,7 +38,9 @@ classifiers = [
     "Topic :: Software Development :: Testing",
     "Topic :: System :: Emulators",
 ]
-dependencies = []
+dependencies = [
+    "vice-driver>=0.1.0",
+]
 
 [project.optional-dependencies]
 dev = [

@@ -65,38 +65,34 @@ frame → fix.
 | `https://csdb.dk/getinternalfile.php/276275/SID-Wizard-1.94-with-sources.tar.gz` | Source archive if `/tmp` is gone. ~8.5 MB. |
 | `https://github.com/anarkiwi/asid-vice` | The VICE fork that exposes the binary monitor extensions this driver relies on (KEYMATRIX_*, SCREEN_GET, DRIVE_ATTACH). |
 
-## Code-reuse policy from defmon-driver
+## Code-reuse policy: depend on `vice-driver` (upstream)
 
-Read these defmon-driver modules first — most of them are **literally
-reusable** (the protocol they speak is editor-agnostic):
+The editor-agnostic asid-vice client has been extracted into the
+**[vice-driver](https://pypi.org/project/vice-driver/)** PyPI package.
+This repo depends on it (see ``pyproject.toml``) and imports
+``BinMon``, ``ViceContainer``, ``KEY`` / ``lookup`` / ``text_to_chords``,
+``ScreenSnapshot`` / ``parse_screen_response`` directly from
+``vice_driver``. ``vice_driver.coverage`` (CHECK_STORE/EXEC harness)
+and ``vice_driver.expect`` (post-action assertion helpers) are also
+available when the editor-automation phase wants them.
 
-| defmon-driver module | Sidwizard-driver disposition |
-|---|---|
-| `defmon_driver/binmon.py` (950 LOC) | **Copy verbatim.** Binmon wire protocol; nothing defMON-specific. |
-| `defmon_driver/vice_docker.py` (200 LOC) | **Copy verbatim** including the `sounddev="dump"` plumbing — that's the SID-write capture path. |
-| `defmon_driver/keys.py` (280 LOC), `keycode_table.py` (280 LOC), `bootstrap_keycodes.py` (90 LOC) | **Copy.** C64 key matrix is editor-agnostic. |
-| `defmon_driver/screen.py` (170 LOC) | **Copy.** SCREEN_GET parsing; same screencode → ASCII translation. |
-| `defmon_driver/keyhandler.py` (700 LOC) | **Adapt.** The mechanism (direct-call key injection bypassing CIA debounce) is generic; the entry-point address inside the running ROM is SID-Wizard-specific (see "Open questions" below). |
-| `defmon_driver/coverage.py` (370 LOC) | **Copy as-is.** It's a CHECK_STORE/EXEC harness driven by the binmon `Coverage` API; useful for measuring which player-asm bands fire on a given tune. |
-| `defmon_driver/defmon.py` (1500 LOC) | **Do NOT copy.** This is the defMON-specific keyboard-shortcut + screen-layout layer. Write a SID-Wizard equivalent (`sidwizard.py`) from scratch — see Phase 1 below. |
-| `defmon_driver/field_setter.py`, `sidtab.py`, `calibrate_sidtab.py`, `tune_manifest.py`, `tune_navigation.py` | **Skip in v0.** These are defMON-data-model-specific; SID-Wizard's data model is different and is already covered by `pysidwizard`'s reader/writer. |
-
-**Decision the next agent must make first**: whether to vendor a copy
-of those modules or extract them upstream into a shared
-`asid-vice-driver` package that both projects depend on.
-Recommendation: **vendor first** to avoid blocking on a refactor of
-defmon-driver; extract later once the seams are clear. Defmon-driver
-intentionally has zero runtime deps; preserve that property here.
+Only SID-Wizard- and SWM-specific code lives here:
+``sidwizard_driver.sidwizard`` (boot flow, TUNEHEADER discovery,
+disk-menu nav, F1 play), ``sidwizard_driver.d64`` (single-PRG disk
+writer used to deliver SWMs through the editor's own loader), and
+``sidwizard_driver.dump`` (decoder for VICE's ``sounddev=dump``
+trace). See ``SHARED_INFRA.md`` for the up-to-date split.
 
 ## Phase 0 — bootstrap (half a day)
 
 Goal: prove the toolchain works end-to-end before writing any
 SID-Wizard-aware code.
 
-1. `cp -r /scratch/anarkiwi/defmon-driver/{LICENSE,pyproject.toml,pyrightconfig.json} .` and rename the project in `pyproject.toml` to `sidwizard-driver`.
-2. Vendor the modules listed under "Copy" above into
-   `sidwizard_driver/`.
-3. Add a `sidwizard_driver/smoke.py` that:
+1. `pip install vice-driver>=0.1.0` (already declared in
+   ``pyproject.toml``). No vendoring — this repo imports the protocol
+   client, container lifecycle, key matrix, and screen scrape directly
+   from ``vice_driver``.
+2. Add a `sidwizard_driver/smoke.py` that:
    - spins up a `ViceContainer` autostarting `disk1.d64`,
    - connects `BinMon`, calls `bm.exit()` to resume the CPU,
    - waits ~30 s, calls `bm.screen_get()`, and prints the screen text.
@@ -224,30 +220,33 @@ Possible workstreams, in priority order:
   byte-exact `.swm` reader/writer with structured `Row` /
   `Instrument` / `SequenceCommand` types — use that.
 
-## Status (after the v0 prototype landed)
+## Status (after v0.2 — path B + vice-driver migration)
 
-A minimal prototype scaffold is committed:
-
-* `sidwizard_driver/binmon.py`, `vice_docker.py`, `keys.py` — vendored
-  verbatim from defmon-driver.
-* `sidwizard_driver/dump.py` — pure-Python decoder for VICE's
-  `sounddev=dump` text trace (format confirmed against
-  `src/arch/shared/sounddrv/sounddump.c`: `dump2` is the active path
-  for software-SID writes — see Open Question 2 below).
-* `sidwizard_driver/sidwizard.py` — `Sidwizard` class with
-  `wait_for_idle` (poll IRQ vector at `$0314/$0315`),
-  `discover_tuneheader` (byte-pattern scan for `loadtun`'s
-  `LDX #<TUNEHEADER / LDY #>TUNEHEADER / LDA #$00 / JSR $FFD5`),
-  `side_load_swm`, and `play` (F1).
+* Depends on the upstream **vice-driver** package for the asid-vice
+  protocol client, container lifecycle, key matrix, and screen scrape.
+  No more vendored copies of those modules here.
+* `sidwizard_driver/sidwizard.py` — `Sidwizard` class:
+  ``wait_for_startup_menu`` → ``dismiss_startup_menu`` →
+  ``wait_for_editor`` (the editor doesn't hook ``$0314/$0315``; the
+  alive signal is the loadtun signature scan returning a SWM1-pointing
+  address); ``load_swm_via_menu`` drives SHIFT+F7 → CRSRDOWN → RETURN
+  → typed filename → RETURN; ``play`` taps F1.
+* `sidwizard_driver/d64.py` — single-PRG ``.d64`` writer used to deliver
+  the SWM through SID-Wizard's own loadtun + depackt path.
+* `sidwizard_driver/dump.py` — decoder for VICE's ``sounddev=dump``
+  text trace (format confirmed against
+  ``src/arch/shared/sounddrv/sounddump.c`` in asid-vice — see Open
+  Question 2 below).
 * `sidwizard_driver/smoke.py`, `capture.py` — CLI entry points.
-* 17 offline unit tests covering the dump decoder, frame quantiser,
-  dedup, CSV writer, and the TUNEHEADER signature scan.
-* `SHARED_INFRA.md` — running tally of which vendored modules survived
-  verbatim (extract candidates) vs needed an editor-specific shim
-  (split candidates) vs would have to be rewritten (project-local).
+* `sidwizard_driver/fixtures/flashitback.reference.csv` — 49,667-row
+  reference capture from the live editor for pysidwizard's diff harness.
+* 36 offline unit tests covering the dump decoder (incl. truncated
+  trailing line), d64 invariants, and the disambiguating TUNEHEADER
+  signature scan.
 
-The pieces from "Phase 2 capture" wire together but produce a
-**not-yet-comparable** trace because of the **side-load gap** below.
+The pieces from "Phase 2 capture" wire together and produce
+real-but-not-yet-frame-aligned traces (cycle origin = VICE boot, not
+F1 press — that's the recommended next step).
 
 ## Open questions
 

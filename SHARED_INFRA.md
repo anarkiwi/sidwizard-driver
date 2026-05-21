@@ -1,64 +1,43 @@
-# Shared-infra candidates (sidwizard-driver vs defmon-driver)
+# Shared-infra status
 
-Living index of modules vendored from `defmon-driver` and what kind of
-sharing they would justify if both projects were refactored onto a
-common `asid-vice-driver` base. Updated as each module is touched.
+The extraction recommended by the early-prototype edition of this file
+has happened: the editor-agnostic asid-vice client now lives in the
+upstream **[vice-driver](https://pypi.org/project/vice-driver/)**
+package (v0.1.0). This repo depends on it via ``pyproject.toml`` and
+no longer carries vendored copies of the protocol modules.
 
-Categories:
-- **extract** — vendored verbatim; zero edits; an upstream extraction would
-  literally make both repos thinner.
-- **split** — mostly editor-agnostic, but one or two methods need an
-  editor-specific shim. Right shape is a base class in the shared package
-  with per-editor subclasses in each driver.
-- **rewrite** — copy-paste would mislead; functionally similar but tightly
-  coupled to the editor's data model or memory layout. Each driver owns
-  its own.
-- **skip (v0)** — not vendored yet; revisit when the corresponding use
-  case appears.
+## What moved upstream (re-imported from `vice_driver`)
 
-| defmon-driver module | LOC | Category | Notes |
-|---|---|---|---|
-| `binmon.py` | 952 | **extract** | Pure asid-vice wire protocol. Zero defMON-specific content. Vendored verbatim. |
-| `vice_docker.py` | 197 | **extract** | Container lifecycle + `sounddev=dump` plumbing. Zero editor coupling. Vendored verbatim. |
-| `keys.py` | 277 | **extract** | C64 key matrix + ASCII→chord. Mirrors `mon_keymatrix.c`. Vendored verbatim. |
-| `keycode_table.py` | 282 | **skip (v0)** | Symbolic chord-name calibration. Useful once the driver grows beyond hard-coded F1; not needed for the capture loop. |
-| `bootstrap_keycodes.py` | 88 | **skip (v0)** | Imports `Defmon`. To share, would need to be parameterised on an editor-shaped trait (open menu / read screen). |
-| `screen.py` | 174 | **extract** | SCREEN_GET parsing + screencode→ASCII. Vendored verbatim once the path-B disk-menu navigation needed screen polling for the load-completion signal. Confirmed editor-agnostic on second use. |
-| `keyhandler.py` | 718 | **split / skip (v0)** | Direct-call key injection bypassing CIA debounce. We skipped vendoring for v0 because the matrix-tap path is fast enough for the small key count (SHIFT+F7, CRSRDOWN, RETURN×2, F1). When editor automation grows past ~10 keypresses per second this becomes the bottleneck; the right shape will be a base class + per-editor `KEYHANDLER_ENTRY` constant. |
-| `coverage.py` | 370 | **extract (likely)** | CHECK_STORE/EXEC harness over the binmon Coverage API. Editor-agnostic on inspection. Confirm when ported. |
-| `defmon.py` | 1500 | **rewrite** | Tightly coupled to defMON's screen layout and keyboard map. Sidwizard equivalent (`sidwizard.py`) is the analogue. |
-| `field_setter.py` | 875 | **rewrite** | defMON UI modal model. Sidwizard's UI is different (pattern / sequence / instrument editors); the field-setter abstraction itself may extract once a second implementation exists. |
-| `sidtab.py`, `calibrate_sidtab.py`, `tune_manifest.py`, `tune_navigation.py` | — | **rewrite or omit** | defMON-data-model-specific. Sidwizard's data model is covered by `pysidwizard`'s reader/writer. |
-
-## sidwizard-driver-only modules
-
-| sidwizard-driver module | LOC | Notes |
+| Module | Previous local path | Upstream path |
 |---|---|---|
-| `d64.py` | ~200 | Minimal 1541 disk-image writer. PRG-only, single file. Round-trip-validated against c1541. Not in defmon-driver — it's the wrapper around the "drive the editor's own loader" strategy. Belongs in the shared package if both drivers ever start synthesising disks. |
-| `dump.py` | ~140 | Decoder for VICE's `sounddev=dump` text trace. Not in defmon-driver but would be useful there too; **extract candidate** if defmon-driver ever wants a per-SID-write trace independently of its CHECK_STORE coverage harness. |
+| Binmon wire protocol | `sidwizard_driver/binmon.py` | `vice_driver.binmon` |
+| Container lifecycle  | `sidwizard_driver/vice_docker.py` | `vice_driver.vice_docker` |
+| C64 key matrix + chord typing | `sidwizard_driver/keys.py` | `vice_driver.keys` |
+| `SCREEN_GET` parsing | `sidwizard_driver/screen.py` | `vice_driver.screen` |
 
-## Proposed shared package layout (if extracted later)
+Upstream also ships ``vice_driver.coverage`` (CHECK_STORE/EXEC harness)
+and ``vice_driver.expect`` (post-action assertion helpers); neither is
+needed by sidwizard-driver yet but they're available the moment the
+editor-automation phase wants them.
 
-```
-asid_vice_driver/
-    binmon.py          # extract
-    vice_docker.py     # extract
-    keys.py            # extract
-    screen.py          # extract (deferred — first user needed)
-    keycode_table.py   # extract
-    coverage.py        # extract (confirm on second use)
-    keyhandler/
-        __init__.py    # base class with the direct-call mechanism
-        # subclasses register an editor-specific entry-point address
-```
+## What stays SID-Wizard-/SWM-specific (local)
 
-Then each driver depends on `asid-vice-driver` and ships only its
-editor-specific layer (`defmon.py`, `sidwizard.py`, field setters,
-calibration JSON, etc.).
+| Module | Rationale |
+|---|---|
+| `sidwizard_driver/sidwizard.py` | SID-Wizard-specific boot flow (startup-menu dismissal), TUNEHEADER discovery (SWM1-magic disambiguation), disk-menu navigation (SHIFT+F7 → CRSRDOWN → RETURN → type → RETURN), F1 play. Tightly coupled to SID-Wizard 1.94's UI. |
+| `sidwizard_driver/d64.py` | Single-PRG ``.d64`` writer used to deliver SWM modules through SID-Wizard's own loader. Generic enough to extract to `vice_driver` if a second driver ever needs to synthesise disks (defmon-driver has a similar need for tune-import smokes), but only one user today. |
+| `sidwizard_driver/dump.py` | Decoder for VICE's ``sounddev=dump`` text trace. Also generic; same "extract on second user" rule applies. |
+| `sidwizard_driver/capture.py`, `smoke.py` | CLIs that compose the above. |
 
-## Recommendation
+## What's NOT migrated yet
 
-Vendor first; revisit extraction once at least two of `keyhandler`,
-`screen`, `coverage` are in use in both drivers. Premature extraction
-would block on a defmon-driver refactor that doesn't pay for itself
-until the sidwizard-driver editor phase exists.
+`defmon-driver`'s editor-specific modules (`defmon.py`, `field_setter.py`,
+`sidtab.py`, `calibrate_sidtab.py`, `tune_manifest.py`, `tune_navigation.py`,
+`keyhandler.py`, `bootstrap_keycodes.py`, `keycode_table.py`) — these
+stay defmon-driver-local because they encode defMON's data model and
+UI; they don't share with SID-Wizard's. If a second user of
+``keyhandler.py``'s direct-call mechanism ever appears in this repo
+(needed when SID-Wizard automation grows past ~10 keypresses/sec) we'd
+revisit the split — at that point ``vice_driver`` would gain a base
+class with the dispatch machinery and the per-editor entry-point
+address would stay in each driver.
