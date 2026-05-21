@@ -40,6 +40,7 @@ from typing import Optional
 
 from vice_driver import BinMon, KEY, lookup, parse_screen_response, text_to_chords
 from vice_driver.binmon import TAP_MODE_FIXED
+from vice_driver.expect import Expect, verify
 
 from .d64 import write_d64_with_swm
 
@@ -51,6 +52,14 @@ log = logging.getLogger(__name__)
 # before the user picks a player — see
 # native/sources/include/startupmenu.inc.
 STARTUP_MENU_MARKER = "STARTUP-MENU"
+
+# Offset inside the SWM file header where the AUTHOR field starts.
+# Mirrors pysidwizard.constants.AUTHOR_POS. The editor writes the
+# author info for the live tune into TUNEHEADER + this offset, so
+# watching the first byte here is a cheap "did a new tune just land?"
+# signal — distinct tunes almost always have distinct author strings,
+# and even the default-empty-tune-vs-loaded transition flips this byte.
+TUNEHEADER_AUTHOR_OFFSET = 0x18
 
 # Editor RAM scan range. SID-Wizard's editor PRG loads from $0801
 # (BASIC stub + SYS) and grows up; capping at $C000 stays below the
@@ -331,15 +340,21 @@ class Sidwizard:
         swm_path: str,
         host_d64_path: str,
         container_d64_path: str,
-        load_settle: float = 2.0,
+        tuneheader: int,
+        load_timeout: float = 10.0,
     ) -> None:
-        """Full path-B load: build d64, attach, drive menu, type name, wait.
+        """Full path-B load: build d64, attach, drive menu, type name,
+        verify the load completed.
 
-        ``load_settle`` is the wall-clock pause after the final RETURN.
-        In warp mode the actual load+depack takes microseconds of wall
-        time, but the host-side mount → DOS open → KERNAL load →
-        depackt path goes through several VICE alarms, so we wait
-        generously rather than tight-polling for a completion signal.
+        Completion is detected by polling TUNEHEADER + author offset
+        until the byte differs from the pre-load snapshot — i.e. a new
+        tune's author string overwrote the previous one. The editor's
+        loadtun → depackt → dispaut path runs in microseconds of warp
+        time, so the verify usually returns on the first poll.
+
+        Raises :class:`SidwizardError` if the byte never changes within
+        ``load_timeout`` — almost always means the filename wasn't on
+        the disk (FILE NOT FOUND) or the menu navigation desynced.
         """
         log.info("building d64 and attaching %s as drive 8", swm_path)
         on_disk_name = write_d64_with_swm(host_d64_path, swm_path)
@@ -352,11 +367,71 @@ class Sidwizard:
         if typed.upper().endswith(".SWM"):
             typed = typed[:-4]
 
+        # Snapshot the byte we'll watch BEFORE the load runs.
+        watch_addr = tuneheader + TUNEHEADER_AUTHOR_OFFSET
+        pre_byte = self.bm.mem_get(watch_addr, watch_addr)[0]
+        log.debug("pre-load TUNEHEADER+$%02X = $%02X",
+                  TUNEHEADER_AUTHOR_OFFSET, pre_byte)
+
         log.info("entering load menu...")
         self.enter_load_menu()
         log.info("typing filename %r...", typed)
         self.type_filename(typed)
         log.info("tapping RETURN to load...")
         self._tap([KEY.RETURN])
-        log.info("waiting %.1fs for load+depack to complete", load_settle)
-        time.sleep(load_settle)
+
+        ok, observed = verify(
+            self.bm,
+            Expect(addr=watch_addr,
+                   want=lambda b, p=pre_byte: b != p,
+                   timeout=load_timeout,
+                   poll_interval=0.1),
+        )
+        if not ok:
+            raise SidwizardError(
+                f"load did not complete within {load_timeout:.1f}s "
+                f"(TUNEHEADER+${TUNEHEADER_AUTHOR_OFFSET:02X} still "
+                f"${observed:02X}; FILE NOT FOUND or menu desync?)"
+            )
+        log.info("load complete (author byte $%02X → $%02X)", pre_byte, observed)
+
+    # ---- cycle-counter wait -----------------------------------------
+
+    def cycle(self) -> int:
+        """Return the absolute CPU cycle counter from the most recent
+        ``cpuhistory`` entry."""
+        history = self.bm.cpuhistory_get(count=1)
+        if not history:
+            raise SidwizardError("cpuhistory_get returned empty list")
+        return history[0].cycle
+
+    def wait_for_cycles(
+        self,
+        cycle_count: int,
+        timeout: float = 120.0,
+        poll_interval: float = 0.5,
+    ) -> tuple[int, int]:
+        """Block until at least ``cycle_count`` CPU cycles have elapsed
+        from now. Returns ``(start_cycle, end_cycle)``.
+
+        ``start_cycle`` is the absolute cycle counter sampled at the
+        start of the wait — useful as the ``start_cycle`` argument to
+        :func:`sidwizard_driver.dump.quantise_to_frames` so the
+        emitted CSV's frame 0 corresponds to "now".
+
+        ``timeout`` is wall-clock; warp mode typically runs at >>1x
+        real-time so the default is generous.
+        """
+        start = self.cycle()
+        target = start + cycle_count
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            cur = self.cycle()
+            if cur >= target:
+                return start, cur
+            time.sleep(poll_interval)
+        cur = self.cycle()
+        raise SidwizardError(
+            f"wait_for_cycles({cycle_count}) timed out after {timeout:.1f}s; "
+            f"only {cur - start} cycles elapsed"
+        )

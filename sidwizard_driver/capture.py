@@ -33,12 +33,34 @@ import logging
 import os
 import sys
 import tempfile
-import time
 
 from vice_driver import BinMon, DiskMount, ViceContainer, ViceContainerError
 
 from .dump import PAL_CYCLES_PER_FRAME, decode_dump_file
 from .sidwizard import Sidwizard, SidwizardError
+
+# SWM header: 2-byte PRG load address, then 4 bytes magic "SWM1",
+# then byte at offset 4 = framespeed. Mirrors pysidwizard.constants
+# (FRAMESPEED_POS = 0x04).
+SWM_FRAMESPEED_OFFSET = 2 + 0x04
+
+
+def _read_swm_framespeed(swm_path: str) -> int:
+    """Return the framespeed byte from a ``.swm`` file (1 for normal
+    play; 2 for double-speed tunes like euphoria.swm). The player runs
+    its update routine ``framespeed`` times per video frame, so
+    ``cycles_per_frame = 19656 // framespeed`` is the right granularity
+    for the captured CSV — matches
+    :data:`pysidwizard.player.SWMPlayer.cycles_per_frame`.
+    """
+    with open(swm_path, "rb") as fp:
+        head = fp.read(SWM_FRAMESPEED_OFFSET + 1)
+    if len(head) <= SWM_FRAMESPEED_OFFSET:
+        raise ValueError(f"{swm_path}: too short to read framespeed")
+    fs = head[SWM_FRAMESPEED_OFFSET]
+    if not 1 <= fs <= 4:
+        raise ValueError(f"{swm_path}: unreasonable framespeed value {fs}")
+    return fs
 
 log = logging.getLogger("sidwizard_driver.capture")
 
@@ -63,8 +85,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--image", default="asid-vice:latest")
     p.add_argument("--port", type=int, default=6502)
     p.add_argument("--idle-timeout", type=float, default=60.0)
-    p.add_argument("--load-settle", type=float, default=2.0,
-                   help="wall-clock seconds to wait after picking the SWM in the file dialog")
+    p.add_argument("--load-timeout", type=float, default=10.0,
+                   help="seconds to wait for TUNEHEADER author byte to change after the RETURN that triggers loadtun")
+    p.add_argument("--capture-timeout", type=float, default=120.0,
+                   help="wall-clock cap on the cycle-counter wait for --frames frames")
     p.add_argument("-v", "--verbose", action="count", default=0)
     return p.parse_args(argv)
 
@@ -135,14 +159,24 @@ def _run_live(args: argparse.Namespace) -> int:
         sounddump_path=container_dump,
     )
 
+    # Compute cycles-per-frame up-front from the SWM's framespeed (1
+    # for normal tunes; 2 for euphoria). ``--frames N`` always means
+    # "N player frames" so the cycle budget scales with framespeed.
+    if args.swm:
+        framespeed = _read_swm_framespeed(args.swm)
+    else:
+        framespeed = 1
+    cycles_per_frame = PAL_CYCLES_PER_FRAME // framespeed
+    target_cycles = args.frames * cycles_per_frame
+
+    start_cycle = 0
     try:
         with container:
             with BinMon(port=args.port) as bm:
                 bm.exit()
                 sw = Sidwizard(bm)
                 log.info("waiting for SID-Wizard idle...")
-                sw.wait_for_idle(timeout=args.idle_timeout)
-                tuneheader = sw.discover_tuneheader()
+                tuneheader = sw.wait_for_idle(timeout=args.idle_timeout)
                 log.info("TUNEHEADER = $%04X (editor confirmed alive)", tuneheader)
 
                 if args.swm:
@@ -150,7 +184,8 @@ def _run_live(args: argparse.Namespace) -> int:
                         swm_path=args.swm,
                         host_d64_path=host_swm_d64,
                         container_d64_path=container_swm_d64,
-                        load_settle=args.load_settle,
+                        tuneheader=tuneheader,
+                        load_timeout=args.load_timeout,
                     )
                 else:
                     log.info("smoke mode: no SWM loaded; capturing default editor state")
@@ -158,14 +193,19 @@ def _run_live(args: argparse.Namespace) -> int:
                 log.info("tapping F1 to play...")
                 sw.play()
 
-                # Wait for `frames` PAL frames of player time. Warp
-                # mode typically runs at >5x real-time, but conservative
-                # to wait at least frames/50 seconds wall-clock so we
-                # don't truncate on slower hosts.
-                sleep_seconds = max(2.0, args.frames / 50.0)
-                log.info("running for ~%.1f wall seconds (>= %d frames in warp)",
-                         sleep_seconds, args.frames)
-                time.sleep(sleep_seconds)
+                # Poll the CPU cycle counter rather than wall-clock
+                # sleeping: warp mode is much faster than real-time, so
+                # cycle polling finishes as soon as the player has
+                # actually run for `frames` player frames. The
+                # start_cycle gives us the anchor for frame-zero
+                # alignment in the CSV downstream.
+                log.info("waiting for %d cycles (%d player frames @ framespeed=%d) since F1...",
+                         target_cycles, args.frames, framespeed)
+                start_cycle, end_cycle = sw.wait_for_cycles(
+                    target_cycles, timeout=args.capture_timeout
+                )
+                log.info("captured %d cycles (start=%d, end=%d)",
+                         end_cycle - start_cycle, start_cycle, end_cycle)
     except ViceContainerError as e:
         print(f"VICE container error: {e}", file=sys.stderr)
         return 4
@@ -177,12 +217,21 @@ def _run_live(args: argparse.Namespace) -> int:
         print(f"no dump file produced at {host_dump}", file=sys.stderr)
         return 6
 
-    log.info("decoding %s -> %s", host_dump, args.out)
+    log.info("decoding %s -> %s (frame 0 anchored at cycle %d; "
+             "framespeed=%d, cycles/frame=%d; cap = %d frames)",
+             host_dump, args.out, start_cycle, framespeed,
+             cycles_per_frame, args.frames)
     with open(args.out, "w", newline="") as fp:
-        n = decode_dump_file(host_dump, fp, dedup=not args.no_dedup)
+        n = decode_dump_file(
+            host_dump,
+            fp,
+            cycles_per_frame=cycles_per_frame,
+            dedup=not args.no_dedup,
+            start_cycle=start_cycle,
+            max_frame=args.frames - 1,
+        )
     print(f"wrote {n} rows to {args.out} (workdir preserved at {host_work_dir})")
-    log.info("PAL cycles/frame = %d; nominal capture window = %d cycles",
-             PAL_CYCLES_PER_FRAME, PAL_CYCLES_PER_FRAME * args.frames)
+    log.info("nominal capture window = %d cycles", target_cycles)
     return 0
 
 

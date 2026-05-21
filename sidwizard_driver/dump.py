@@ -175,15 +175,41 @@ def decode_dump_file(
     chipno: int = 0,
     start_cycle: int = 0,
     dedup: bool = True,
+    drop_pre_anchor: bool = True,
+    max_frame: Optional[int] = None,
 ) -> int:
     """High-level: open dump file, filter, quantise, dedup, write CSV.
 
     Returns the number of CSV data rows written.
+
+    When ``start_cycle`` is non-zero, ``drop_pre_anchor`` (default
+    True) discards rows with negative frame numbers — these are SID
+    writes that happened before the anchor (typically: boot-time
+    register touches before F1 was pressed). Set False to keep them.
+
+    When ``max_frame`` is set, rows with ``frame > max_frame`` are
+    dropped. Useful for capping a capture to exactly N frames despite
+    VICE continuing to write during container shutdown.
     """
+    def _drop_negative(rows):
+        for frame, reg, value in rows:
+            if frame >= 0:
+                yield frame, reg, value
+
+    def _cap(rows, cap):
+        for frame, reg, value in rows:
+            if frame > cap:
+                return
+            yield frame, reg, value
+
     with open(path) as fp:
         records = iter_records(fp)
         records = filter_sid(records, chipno=chipno)
         rows = quantise_to_frames(records, cycles_per_frame=cycles_per_frame, start_cycle=start_cycle)
+        if drop_pre_anchor and start_cycle > 0:
+            rows = _drop_negative(rows)
+        if max_frame is not None:
+            rows = _cap(rows, max_frame)
         if dedup:
             rows = dedupe_consecutive(rows)
         return write_csv(rows, out)

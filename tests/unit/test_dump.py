@@ -178,6 +178,61 @@ def test_decode_dump_file_end_to_end(tmp_path):
     ]
 
 
+def test_decode_dump_file_drops_pre_anchor_rows(tmp_path):
+    """With start_cycle > 0, records before the anchor (negative frame
+    numbers) should be dropped by default."""
+    dump = tmp_path / "trace.txt"
+    body = "\n".join(
+        [
+            "1000 0 0 0 4 1",  # cycle 1000 — pre-anchor at start=5000
+            "5000 0 0 0 4 2",  # cycle 6000 — frame 0
+            f"{PAL_CYCLES_PER_FRAME} 0 0 0 4 3",  # cycle 6000+19656 — frame 1
+        ]
+    )
+    dump.write_text(body + "\n")
+    out = io.StringIO()
+    n = decode_dump_file(str(dump), out, start_cycle=6000)
+    assert n == 2
+    lines = out.getvalue().splitlines()
+    assert lines == ["frame,reg,value", "0,4,2", "1,4,3"]
+
+
+def test_decode_dump_file_caps_at_max_frame(tmp_path):
+    """max_frame=N drops rows with frame > N — used to trim writes
+    that leak in during VICE container shutdown."""
+    dump = tmp_path / "trace.txt"
+    body = "\n".join(
+        [
+            f"{PAL_CYCLES_PER_FRAME} 0 0 0 4 1",  # frame 1
+            f"{PAL_CYCLES_PER_FRAME} 0 0 0 4 2",  # frame 2
+            f"{PAL_CYCLES_PER_FRAME} 0 0 0 4 3",  # frame 3 — past cap
+            f"{PAL_CYCLES_PER_FRAME} 0 0 0 4 4",  # frame 4 — past cap
+        ]
+    )
+    dump.write_text(body + "\n")
+    out = io.StringIO()
+    n = decode_dump_file(str(dump), out, max_frame=2)
+    assert n == 2
+    lines = out.getvalue().splitlines()
+    assert lines == ["frame,reg,value", "1,4,1", "2,4,2"]
+
+
+def test_decode_dump_file_keeps_pre_anchor_when_disabled(tmp_path):
+    dump = tmp_path / "trace.txt"
+    dump.write_text(
+        "\n".join(
+            [
+                "1000 0 0 0 4 1",
+                "5000 0 0 0 4 2",
+            ]
+        )
+        + "\n"
+    )
+    out = io.StringIO()
+    n = decode_dump_file(str(dump), out, start_cycle=6000, drop_pre_anchor=False)
+    assert n == 2  # pre-anchor row stays
+
+
 def test_decode_dump_file_no_dedup_keeps_all(tmp_path):
     dump = tmp_path / "trace.txt"
     dump.write_text(
