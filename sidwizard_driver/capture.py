@@ -3,30 +3,27 @@
 Run: ``python -m sidwizard_driver.capture --d64 disk1.d64 --swm tune.swm
                                           --frames 1500 --out tune.csv``
 
-Boots SID-Wizard inside asid-vice with ``-sounddev dump``, side-loads
-``tune.swm`` into ``TUNEHEADER``, taps F1 to play, waits long enough
-for ``--frames`` PAL frames of CPU work, then decodes the dump file
-into a ``(frame, reg, value)`` CSV matching pysidwizard's render_wav
-sibling schema.
+Boots SID-Wizard inside asid-vice with ``-sounddev dump``, loads
+``tune.swm`` via SID-Wizard's own disk menu (so the in-place depack
+runs), taps F1 to play, waits long enough for ``--frames`` PAL frames
+of CPU work, then decodes the dump file into a ``(frame, reg, value)``
+CSV matching pysidwizard's render_wav sibling schema.
 
-Status (v0)
------------
-End-to-end execution is **gated on the side-load gap** documented in
-``AGENTS.md``: ``side_load_swm`` writes the packed SWM payload to
-TUNEHEADER but does NOT call SID-Wizard's in-place depacker
-(``depackt``) or post-load init (``dispaut`` / subtune reset). With
-the gap, ``--frames`` worth of output is still produced (you get the
-register writes the player does over whatever stale data lives at
-TUNEHEADER), but it is not yet the ground truth needed to diff
-pysidwizard.
+The SWM is delivered to the editor by building a fresh single-file
+``.d64`` on the host (see :mod:`sidwizard_driver.d64`), mounting the
+host tempdir read-write into the container, and using asid-vice's
+``DRIVE_ATTACH`` (binmon opcode 0x78) to swap drive 8 to the new disk
+once the editor is idle. Then keymatrix taps drive
+SHIFT+F7 → CRSRDOWN → RETURN → RETURN to enter loadtun and pick the
+first directory entry.
 
-Until the gap closes, the useful operating modes are:
-
-  * ``--smoke``  : run the full pipeline against a freshly-booted
-    editor (no SWM loaded; you'll capture whatever the default empty
-    tune sounds like) — useful for verifying the dump → CSV pipeline.
-  * ``--dump-only PATH`` : skip VICE entirely and re-decode a previously
-    captured dump file. Useful while iterating on the CSV schema.
+Useful operating modes
+----------------------
+* default: full live capture against ``--d64`` and ``--swm``.
+* ``--smoke`` : skip the SWM load; capture whatever the freshly-booted
+  editor emits. Useful for verifying the dump → CSV pipeline.
+* ``--dump-only PATH`` : skip VICE entirely and re-decode a previously
+  captured dump file. Useful while iterating on the CSV schema.
 """
 
 from __future__ import annotations
@@ -37,7 +34,6 @@ import os
 import sys
 import tempfile
 import time
-from typing import Optional
 
 from .binmon import BinMon
 from .dump import PAL_CYCLES_PER_FRAME, decode_dump_file
@@ -67,6 +63,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--image", default="asid-vice:latest")
     p.add_argument("--port", type=int, default=6502)
     p.add_argument("--idle-timeout", type=float, default=60.0)
+    p.add_argument("--load-settle", type=float, default=2.0,
+                   help="wall-clock seconds to wait after picking the SWM in the file dialog")
     p.add_argument("-v", "--verbose", action="count", default=0)
     return p.parse_args(argv)
 
@@ -109,18 +107,22 @@ def _run_live(args: argparse.Namespace) -> int:
         print(f"not a file: {args.swm}", file=sys.stderr)
         return 2
 
-    # ViceContainer writes the dump file to a container-side path; mount
-    # a host tempdir read-write so we can read it back after stop().
-    host_dump_dir = tempfile.mkdtemp(prefix="sidwizard-dump-")
-    container_dump_dir = "/tmp/sidwizard-dump"
-    host_dump = os.path.join(host_dump_dir, "trace.txt")
-    container_dump = f"{container_dump_dir}/trace.txt"
+    # One host tempdir houses both the SWM .d64 (written at runtime)
+    # and the sounddev=dump trace. Mounted read-write into the
+    # container so attach_drive can swap to it and the dump driver
+    # can write into it.
+    host_work_dir = tempfile.mkdtemp(prefix="sidwizard-driver-")
+    container_work_dir = "/tmp/sidwizard-driver"
+    host_dump = os.path.join(host_work_dir, "trace.txt")
+    container_dump = f"{container_work_dir}/trace.txt"
+    host_swm_d64 = os.path.join(host_work_dir, "tune.d64")
+    container_swm_d64 = f"{container_work_dir}/tune.d64"
 
-    container_d64 = "/tmp/sidwizard.d64"
+    container_d64 = "/tmp/sidwizard-editor.d64"
 
     mounts = [
         DiskMount(host_path=args.d64, container_path=container_d64, read_only=True),
-        DiskMount(host_path=host_dump_dir, container_path=container_dump_dir, read_only=False),
+        DiskMount(host_path=host_work_dir, container_path=container_work_dir, read_only=False),
     ]
     container = ViceContainer(
         image=args.image,
@@ -135,36 +137,33 @@ def _run_live(args: argparse.Namespace) -> int:
 
     try:
         with container:
-            tuneheader: Optional[int] = None
             with BinMon(port=args.port) as bm:
                 bm.exit()
                 sw = Sidwizard(bm)
                 log.info("waiting for SID-Wizard idle...")
                 sw.wait_for_idle(timeout=args.idle_timeout)
                 tuneheader = sw.discover_tuneheader()
-                log.info("TUNEHEADER = $%04X", tuneheader)
+                log.info("TUNEHEADER = $%04X (editor confirmed alive)", tuneheader)
 
                 if args.swm:
-                    log.warning(
-                        "side-loading %s — note: in-place depack / post-load init"
-                        " is NOT yet implemented; the captured trace is not yet"
-                        " comparable to pysidwizard's player. See AGENTS.md.",
-                        args.swm,
+                    sw.load_swm_via_menu(
+                        swm_path=args.swm,
+                        host_d64_path=host_swm_d64,
+                        container_d64_path=container_swm_d64,
+                        load_settle=args.load_settle,
                     )
-                    sw.side_load_swm(args.swm, tuneheader)
                 else:
                     log.info("smoke mode: no SWM loaded; capturing default editor state")
 
                 log.info("tapping F1 to play...")
                 sw.play()
 
-                # Wait for `frames` PAL frames of player time. Warp mode
-                # runs much faster than real-time, but the safe bound is
-                # to wait wall-clock for at least frames/50 seconds and
-                # also for the SID write rate to settle. Simple first
-                # implementation: wall-clock sleep on a generous bound.
-                sleep_seconds = max(2.0, args.frames / 50.0 / 5.0)
-                log.info("running for ~%.1f wall seconds (%d frames @ ~5x realtime warp)",
+                # Wait for `frames` PAL frames of player time. Warp
+                # mode typically runs at >5x real-time, but conservative
+                # to wait at least frames/50 seconds wall-clock so we
+                # don't truncate on slower hosts.
+                sleep_seconds = max(2.0, args.frames / 50.0)
+                log.info("running for ~%.1f wall seconds (>= %d frames in warp)",
                          sleep_seconds, args.frames)
                 time.sleep(sleep_seconds)
     except ViceContainerError as e:
@@ -174,18 +173,14 @@ def _run_live(args: argparse.Namespace) -> int:
         print(f"SID-Wizard error: {e}", file=sys.stderr)
         return 5
 
-    # Decode the captured dump file.
     if not os.path.isfile(host_dump):
         print(f"no dump file produced at {host_dump}", file=sys.stderr)
         return 6
 
-    # Trim to --frames worth of output by setting start_cycle to 0 (we
-    # don't know exactly when F1 fired in CPU cycles) and discarding
-    # rows past PAL_CYCLES_PER_FRAME * frames. Imperfect — see TODOs.
     log.info("decoding %s -> %s", host_dump, args.out)
     with open(args.out, "w", newline="") as fp:
         n = decode_dump_file(host_dump, fp, dedup=not args.no_dedup)
-    print(f"wrote {n} rows to {args.out} (dump preserved at {host_dump})")
+    print(f"wrote {n} rows to {args.out} (workdir preserved at {host_work_dir})")
     log.info("PAL cycles/frame = %d; nominal capture window = %d cycles",
              PAL_CYCLES_PER_FRAME, PAL_CYCLES_PER_FRAME * args.frames)
     return 0

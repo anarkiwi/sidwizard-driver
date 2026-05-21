@@ -67,13 +67,8 @@ def main(argv: list[str] | None = None) -> int:
                 # the autostart sequence.
                 bm.exit()
                 sw = Sidwizard(bm)
-                log.info("waiting for SID-Wizard to hook the IRQ vector...")
-                sw.wait_for_idle(timeout=args.idle_timeout)
-                try:
-                    tuneheader = sw.discover_tuneheader()
-                except SidwizardError as e:
-                    print(f"TUNEHEADER discovery failed: {e}", file=sys.stderr)
-                    return 3
+                log.info("driving bootloader → startup menu → editor...")
+                tuneheader = sw.wait_for_idle(timeout=args.idle_timeout)
                 print(f"SID-Wizard booted; TUNEHEADER = ${tuneheader:04X}")
                 return 0
     except ViceContainerError as e:

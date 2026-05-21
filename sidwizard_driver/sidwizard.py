@@ -38,19 +38,19 @@ import struct
 import time
 from typing import Optional
 
-from .binmon import BinMon
-from .keys import KEY
+from .binmon import TAP_MODE_FIXED, BinMon
+from .d64 import write_d64_with_swm
+from .keys import KEY, lookup, text_to_chords
+from .screen import parse_screen_response
 
 log = logging.getLogger(__name__)
 
 
-# C64 default IRQ vector at $0314/$0315 points at $EA31 in the KERNAL.
-# SID-Wizard rewrites this vector to its own player entry once boot is
-# complete, so polling these two bytes is the cheapest "is the editor
-# alive yet?" signal we have without a known editor-internal address.
-IRQ_VECTOR_LO = 0x0314
-IRQ_VECTOR_HI = 0x0315
-KERNAL_DEFAULT_IRQ = 0xEA31
+# Text marker visible on the SID-Wizard 1.94 startup-menu screen.
+# Shown after the bootloader paints the player-selection UI and
+# before the user picks a player — see
+# native/sources/include/startupmenu.inc.
+STARTUP_MENU_MARKER = "STARTUP-MENU"
 
 # Editor RAM scan range. SID-Wizard's editor PRG loads from $0801
 # (BASIC stub + SYS) and grows up; capping at $C000 stays below the
@@ -66,9 +66,18 @@ EDITOR_SCAN_HI = 0xC000
 # (see /tmp/sidwizard/SID-Wizard-1.94/native/sources/include/menu.inc
 #  around the ``loadtun`` label). Bytes 1 and 3 (TUNEHEADER lo/hi)
 # are the immediate operands we want to recover.
+#
+# The signature is NOT unique in SID-Wizard 1.94 — `loadins` (instrument
+# load) and one other call site emit the same pattern with different
+# immediates. Disambiguation: TUNEHEADER's contents start with the
+# ``SWM1`` magic once the editor has initialised an empty default tune
+# at boot (per the CheckSWM routine — the editor itself relies on this
+# invariant). So among the candidates we filter to the one whose
+# pointee begins with ``SWM1``.
 LOADTUN_TAIL = bytes([0xA9, 0x00, 0x20, 0xD5, 0xFF])
 LOADTUN_LDX = 0xA2
 LOADTUN_LDY = 0xA0
+SWM_MAGIC = b"SWM1"
 
 
 class SidwizardError(RuntimeError):
@@ -82,38 +91,75 @@ class Sidwizard:
         self.bm = bm
 
     # ---- boot --------------------------------------------------------
+    #
+    # SID-Wizard 1.94's `disk1.d64` autostart unfolds in two phases:
+    #   1. A small bootloader displays a startup-menu screen
+    #      ("STARTUP-MENU") asking the user to pick a player variant
+    #      (sidwiz / sidwiz2 / sidwiz3 / sidwiz4) and a tuning.
+    #   2. After the user presses RETURN, the bootloader loads the
+    #      selected editor PRG into RAM and jumps to it — that's the
+    #      tracker UI.
+    #
+    # Surprisingly, the editor does NOT hook the $0314/$0315 IRQ
+    # vector. It installs its player as a raster IRQ via the hardware
+    # $FFFE vector and CIA timer, leaving the KERNAL's $EA31 visible
+    # at $0314. So the "is the editor alive" signal we use is the
+    # `discover_tuneheader()` byte scan — it only matches once the
+    # editor PRG has been loaded into RAM.
 
-    def wait_for_idle(self, timeout: float = 60.0, poll_interval: float = 0.2) -> None:
-        """Block until SID-Wizard has hooked the IRQ vector.
-
-        Polls ``$0314/$0315`` until it stops pointing at the KERNAL
-        default ($EA31) AND has held the same value for two consecutive
-        polls (so we don't trip on a transient mid-boot setup write).
-        """
+    def wait_for_startup_menu(self, timeout: float = 30.0, poll_interval: float = 0.5) -> None:
+        """Block until the SID-Wizard bootloader's startup-menu screen
+        is visible. Used after autostart, before tapping RETURN to
+        select a player."""
         deadline = time.monotonic() + timeout
-        last_vec: Optional[int] = None
-        stable_polls = 0
         while time.monotonic() < deadline:
-            data = self.bm.mem_get(IRQ_VECTOR_LO, IRQ_VECTOR_HI)
-            if len(data) >= 2:
-                vec = data[0] | (data[1] << 8)
-                if vec != KERNAL_DEFAULT_IRQ:
-                    if vec == last_vec:
-                        stable_polls += 1
-                        if stable_polls >= 2:
-                            log.info("SID-Wizard IRQ hooked at $%04X", vec)
-                            return
-                    else:
-                        stable_polls = 1
-                    last_vec = vec
-                else:
-                    stable_polls = 0
-                    last_vec = None
+            snap = parse_screen_response(self.bm.screen_get())
+            if STARTUP_MENU_MARKER in snap.text():
+                log.info("SID-Wizard startup menu visible")
+                return
             time.sleep(poll_interval)
         raise SidwizardError(
-            f"timed out after {timeout:.0f}s waiting for SID-Wizard to hook IRQ"
-            f" (last vector seen: {last_vec})"
+            f"timed out after {timeout:.0f}s waiting for SID-Wizard startup menu"
         )
+
+    def dismiss_startup_menu(self) -> None:
+        """Tap RETURN to confirm the default player selection and load
+        the editor PRG. Idempotent in the sense that pressing RETURN on
+        the editor screen is also harmless (RETURN is the pattern-row
+        commit key in the editor)."""
+        self._tap([KEY.RETURN])
+
+    def wait_for_editor(self, timeout: float = 30.0, poll_interval: float = 0.5) -> int:
+        """Block until the editor PRG is loaded into RAM and the
+        ``loadtun`` byte signature can be found. Returns the discovered
+        ``TUNEHEADER`` address."""
+        deadline = time.monotonic() + timeout
+        last_err: Optional[SidwizardError] = None
+        while time.monotonic() < deadline:
+            try:
+                addr = self.discover_tuneheader()
+                log.info("editor alive; TUNEHEADER = $%04X", addr)
+                return addr
+            except SidwizardError as e:
+                last_err = e
+                time.sleep(poll_interval)
+        raise SidwizardError(
+            f"timed out after {timeout:.0f}s waiting for editor PRG to load"
+            f" (last signature error: {last_err})"
+        )
+
+    def wait_for_idle(self, timeout: float = 60.0, poll_interval: float = 0.5) -> int:
+        """Drive the bootloader through to the live editor.
+
+        Equivalent to: wait_for_startup_menu → dismiss_startup_menu →
+        wait_for_editor. Returns the discovered ``TUNEHEADER`` address
+        as a side-effect; callers that want to skip the dual call can
+        ignore the return value.
+        """
+        half = timeout / 2
+        self.wait_for_startup_menu(timeout=half, poll_interval=poll_interval)
+        self.dismiss_startup_menu()
+        return self.wait_for_editor(timeout=half, poll_interval=poll_interval)
 
     # ---- TUNEHEADER discovery ---------------------------------------
 
@@ -144,16 +190,30 @@ class Sidwizard:
                 f"({EDITOR_SCAN_LO:#06x}-{EDITOR_SCAN_HI:#06x}); "
                 "editor may not have finished loading"
             )
-        # Multiple unique candidates would mean the signature is not
-        # unique enough; SID-Wizard's loadtun is the only such sequence
-        # in a stock build, but warn loudly if that changes.
         unique = sorted(set(candidates))
-        if len(unique) > 1:
+        if len(unique) == 1:
+            return unique[0]
+
+        # Multiple candidates — disambiguate by checking which one
+        # points at SWM1 magic bytes. The editor's init code writes
+        # "SWM1" to TUNEHEADER+0 as part of the empty-tune setup, so
+        # the right candidate is the one whose first 4 bytes match.
+        valid = [
+            addr for addr in unique
+            if self.bm.mem_get(addr, addr + 3) == SWM_MAGIC
+        ]
+        if len(valid) == 1:
+            return valid[0]
+        if not valid:
             raise SidwizardError(
-                f"loadtun signature is ambiguous; candidates: "
+                f"loadtun signature found at {len(unique)} addresses but "
+                f"none point at SWM1 magic: "
                 f"{', '.join(f'${a:04X}' for a in unique)}"
             )
-        return unique[0]
+        raise SidwizardError(
+            f"loadtun signature is ambiguous AND multiple candidates "
+            f"point at SWM1: {', '.join(f'${a:04X}' for a in valid)}"
+        )
 
     # ---- side load --------------------------------------------------
 
@@ -205,3 +265,98 @@ class Sidwizard:
         # accepts the F4 alias (row 0 col 5 + LSHIFT). For a clean
         # "stop everything" we can also use RUN/STOP — simpler.
         self.bm.keymatrix_tap([(KEY.RUNSTOP[0], KEY.RUNSTOP[1])], frames=hold_frames)
+
+    # ---- disk-menu load (path B) ------------------------------------
+    #
+    # The "side-load to TUNEHEADER" shortcut needs a separate depack +
+    # init pass we don't yet implement. Path B routes around it by
+    # driving SID-Wizard's own loadtun, which calls KERNAL.LOAD →
+    # depackt → dispaut → subtune reset in one shot.
+    #
+    # Steps (see native/sources/include/menu.inc and keyhandler.inc):
+    #   1. attach a fresh single-file .d64 holding the .swm to drive 8
+    #   2. tap SHIFT+F7 → menuer (line 2090 in keyhandler.inc)
+    #   3. tap CRSRDOWN once → cursor lands on loadtun (menupoint 2)
+    #   4. tap RETURN → enter file dialog (filename-typer subwindow)
+    #   5. type the filename without extension (SID-Wizard's regname
+    #      appends ``.SWM`` before calling OPEN — see menu.inc:1735)
+    #   6. tap RETURN → load runs through KERNAL.LOAD → depackt
+    #   7. wait for the load + in-place depack to finish
+
+    def _tap(self, keys: list[tuple[int, int]], frames: int = 8, settle: float = 0.2) -> None:
+        """Tap a chord and pause long enough for the editor's IRQ
+        scanner to observe the press AND the subsequent release."""
+        self.bm.keymatrix_tap(keys, mode=TAP_MODE_FIXED, frames=frames)
+        # frames are PAL frames (~20 ms). Wall-clock wait covers tap
+        # duration + editor reaction; settle adds a safety margin.
+        time.sleep(frames * 0.02 + settle)
+
+    def attach_swm_disk(self, swm_path: str, host_d64_path: str, container_d64_path: str) -> None:
+        """Build a fresh single-file .d64 holding ``swm_path`` and attach
+        it to drive 8. ``host_d64_path`` is where the file is written on
+        the host; ``container_d64_path`` is the same path as seen inside
+        the asid-vice container (i.e. via a ``DiskMount``).
+
+        Replaces whatever disk was previously at drive 8 — asid-vice's
+        attach_drive detaches the old image first.
+        """
+        write_d64_with_swm(host_d64_path, swm_path)
+        self.bm.attach_drive(container_d64_path, unit=8, drive=0)
+
+    def enter_load_menu(self) -> None:
+        """Open SID-Wizard's menu, navigate to loadtun, confirm.
+
+        Sequence: SHIFT+F7 (menu) → CRSRDOWN (loadtun is below savetun)
+        → RETURN (opens the file dialog, defaulting to the
+        filename-typer subwindow).
+        """
+        self._tap([KEY.LSHIFT, KEY.F7])
+        self._tap([KEY.CRSRUD])  # CRSRUD without SHIFT = "down"
+        self._tap([KEY.RETURN])
+
+    def type_filename(self, name: str) -> None:
+        """Type ``name`` into the file dialog one chord at a time.
+
+        Letters are upper-cased and sent via matrix taps; SID-Wizard's
+        own keyscan reads the matrix directly so this is sufficient.
+        Do NOT include the ``.SWM`` extension — the editor appends it
+        in ``regname`` (menu.inc:1735) before opening the file.
+        """
+        for chord in text_to_chords(name):
+            keys = [lookup(n) for n in chord]
+            self._tap(keys)
+
+    def load_swm_via_menu(
+        self,
+        swm_path: str,
+        host_d64_path: str,
+        container_d64_path: str,
+        load_settle: float = 2.0,
+    ) -> None:
+        """Full path-B load: build d64, attach, drive menu, type name, wait.
+
+        ``load_settle`` is the wall-clock pause after the final RETURN.
+        In warp mode the actual load+depack takes microseconds of wall
+        time, but the host-side mount → DOS open → KERNAL load →
+        depackt path goes through several VICE alarms, so we wait
+        generously rather than tight-polling for a completion signal.
+        """
+        log.info("building d64 and attaching %s as drive 8", swm_path)
+        on_disk_name = write_d64_with_swm(host_d64_path, swm_path)
+        self.bm.attach_drive(container_d64_path, unit=8, drive=0)
+
+        # Strip the ``.SWM`` extension when typing — the editor appends
+        # it. Defensive against callers passing a name without the
+        # extension by checking the suffix.
+        typed = on_disk_name
+        if typed.upper().endswith(".SWM"):
+            typed = typed[:-4]
+
+        log.info("entering load menu...")
+        self.enter_load_menu()
+        log.info("typing filename %r...", typed)
+        self.type_filename(typed)
+        log.info("tapping RETURN to load...")
+        self._tap([KEY.RETURN])
+        log.info("waiting %.1fs for load+depack to complete", load_settle)
+        time.sleep(load_settle)

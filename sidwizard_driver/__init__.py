@@ -27,7 +27,9 @@ Not modelled
 """
 
 from .binmon import OPCODE, BinMon, BinmonError
+from .d64 import build_d64_with_prg, write_d64_with_prg, write_d64_with_swm
 from .keys import KEY
+from .screen import ScreenSnapshot, parse_screen_response, screencode_to_ascii
 from .sidwizard import Sidwizard, SidwizardError
 from .vice_docker import DiskMount, ViceContainer, ViceContainerError
 
@@ -36,11 +38,17 @@ __all__ = [
     "BinmonError",
     "OPCODE",
     "KEY",
+    "ScreenSnapshot",
+    "parse_screen_response",
+    "screencode_to_ascii",
     "Sidwizard",
     "SidwizardError",
     "ViceContainer",
     "ViceContainerError",
     "DiskMount",
+    "build_d64_with_prg",
+    "write_d64_with_prg",
+    "write_d64_with_swm",
 ]
 
 __version__ = "0.1.0"

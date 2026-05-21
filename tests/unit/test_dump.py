@@ -50,9 +50,23 @@ def test_iter_records_skips_blank_and_comments():
     assert [r.value for r in records] == [1, 2]
 
 
-def test_iter_records_rejects_short_line():
+def test_iter_records_rejects_short_line_mid_stream():
+    """A line with the wrong field count followed by valid lines is a
+    real corruption (not a trailing truncation) — surface it."""
+    body = "100 4 5\n100 0 0 0 4 5\n"  # 4-field line is OK here actually
+    # Use 4 fields (neither legacy nor dump2) followed by a valid line
+    body = "100 0 4 5\n100 0 0 0 4 5\n"
     with pytest.raises(ValueError, match="unrecognised dump record"):
-        list(iter_records(io.StringIO("100 0 4 5\n")))  # 4 fields — neither shape
+        list(iter_records(io.StringIO(body)))
+
+
+def test_iter_records_tolerates_truncated_trailing_line():
+    """VICE's dump driver doesn't flush on shutdown, so the final
+    record can be a partial fprintf. Tolerate it as end-of-stream."""
+    body = "100 0 0 0 4 65\n200 0 0 0 4 70\n282 1194"  # trailing partial
+    records = list(iter_records(io.StringIO(body)))
+    assert len(records) == 2
+    assert records[-1].value == 70
 
 
 def test_filter_sid_drops_other_chip():

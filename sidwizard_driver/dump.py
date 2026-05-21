@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from typing import Iterable, Iterator, TextIO
+from typing import Iterable, Iterator, Optional, TextIO
 
 # PAL cycles per frame. SID-Wizard's player runs every PAL frame
 # (one IRQ at the same scanline each refresh); pysidwizard uses the
@@ -69,9 +69,24 @@ def iter_records(stream: Iterable[str]) -> Iterator[DumpRecord]:
     Lines with 6 fields are ``dump_dump2``; lines with 3 fields are the
     legacy ``dump_dump`` (chipno=0 assumed). Blank lines and lines
     starting with ``#`` are skipped.
+
+    The dump file is written line-by-line via ``fprintf`` without
+    flushing on shutdown, so a final partial line is possible if the
+    container is stopped mid-fprintf. We silently drop trailing
+    records that don't have the expected field count to keep the
+    pipeline robust against that race.
     """
     abs_cycle = 0
+    pending_partial: Optional[str] = None
     for raw in stream:
+        if pending_partial is not None:
+            # We saw a short line previously. If another line follows
+            # it, the short line was a genuine corruption (not a
+            # trailing truncation); surface it.
+            raise ValueError(
+                f"unrecognised dump record (got "
+                f"{len(pending_partial.split())} fields): {pending_partial!r}"
+            )
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -82,7 +97,9 @@ def iter_records(stream: Iterable[str]) -> Iterator[DumpRecord]:
             clks, addr, byte = (int(p) for p in parts)
             chipno = 0
         else:
-            raise ValueError(f"unrecognised dump record (got {len(parts)} fields): {line!r}")
+            # Defer judgement: tolerate this only if it's the LAST line.
+            pending_partial = line
+            continue
         abs_cycle += clks
         yield DumpRecord(cycle=abs_cycle, chipno=chipno, reg=addr, value=byte)
 

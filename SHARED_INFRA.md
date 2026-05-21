@@ -23,12 +23,19 @@ Categories:
 | `keys.py` | 277 | **extract** | C64 key matrix + ASCII→chord. Mirrors `mon_keymatrix.c`. Vendored verbatim. |
 | `keycode_table.py` | 282 | **skip (v0)** | Symbolic chord-name calibration. Useful once the driver grows beyond hard-coded F1; not needed for the capture loop. |
 | `bootstrap_keycodes.py` | 88 | **skip (v0)** | Imports `Defmon`. To share, would need to be parameterised on an editor-shaped trait (open menu / read screen). |
-| `screen.py` | 174 | **skip (v0)** | SCREEN_GET parsing + screencode→ASCII. Editor-agnostic in principle, but the capture loop uses an IRQ checkpoint for readiness instead. Likely **extract** when the editor automation phase lands. |
-| `keyhandler.py` | 718 | **split** | Direct-call key injection bypassing CIA debounce. Mechanism is generic; the handler entry-point address inside ROM is per-editor. Probably a base class + subclass each provides its `KEYHANDLER_ENTRY` constant. |
+| `screen.py` | 174 | **extract** | SCREEN_GET parsing + screencode→ASCII. Vendored verbatim once the path-B disk-menu navigation needed screen polling for the load-completion signal. Confirmed editor-agnostic on second use. |
+| `keyhandler.py` | 718 | **split / skip (v0)** | Direct-call key injection bypassing CIA debounce. We skipped vendoring for v0 because the matrix-tap path is fast enough for the small key count (SHIFT+F7, CRSRDOWN, RETURN×2, F1). When editor automation grows past ~10 keypresses per second this becomes the bottleneck; the right shape will be a base class + per-editor `KEYHANDLER_ENTRY` constant. |
 | `coverage.py` | 370 | **extract (likely)** | CHECK_STORE/EXEC harness over the binmon Coverage API. Editor-agnostic on inspection. Confirm when ported. |
 | `defmon.py` | 1500 | **rewrite** | Tightly coupled to defMON's screen layout and keyboard map. Sidwizard equivalent (`sidwizard.py`) is the analogue. |
 | `field_setter.py` | 875 | **rewrite** | defMON UI modal model. Sidwizard's UI is different (pattern / sequence / instrument editors); the field-setter abstraction itself may extract once a second implementation exists. |
 | `sidtab.py`, `calibrate_sidtab.py`, `tune_manifest.py`, `tune_navigation.py` | — | **rewrite or omit** | defMON-data-model-specific. Sidwizard's data model is covered by `pysidwizard`'s reader/writer. |
+
+## sidwizard-driver-only modules
+
+| sidwizard-driver module | LOC | Notes |
+|---|---|---|
+| `d64.py` | ~200 | Minimal 1541 disk-image writer. PRG-only, single file. Round-trip-validated against c1541. Not in defmon-driver — it's the wrapper around the "drive the editor's own loader" strategy. Belongs in the shared package if both drivers ever start synthesising disks. |
+| `dump.py` | ~140 | Decoder for VICE's `sounddev=dump` text trace. Not in defmon-driver but would be useful there too; **extract candidate** if defmon-driver ever wants a per-SID-write trace independently of its CHECK_STORE coverage harness. |
 
 ## Proposed shared package layout (if extracted later)
 
