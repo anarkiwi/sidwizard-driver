@@ -161,25 +161,39 @@ def find_detuner_base_addr(player_code: bytes, base_addr: int) -> int:
 
         WRPITCH lda FREQLO,x       ; B5 10  (zp,X — FREQLO at $10)
                 adc DETUNER,x      ; 75 ??  (zp,X — ?? is DETUNER's ZP addr)
+                [php; clc; adc pitchShiftLo,x]  ; editor build w/ MIDI
+                sta SIDG.FREQ+0,x  ; 9D LO HI (abs,X) -- SID register
 
-    The pair ``B5 10 75 ??`` is unique to WRPITCH in the player code
-    (no other site does ``lda $10,X ; adc <zp>,X``). Returns the
-    discovered ZP address of DETUNER_v0; the per-voice stride is 7 so
-    v1 = base+7, v2 = base+14.
+    The opening pair ``B5 10 75 ??`` is NOT unique on its own:
+    ``ADDFREQ`` (PORTAUP's ZP-FREQLO advance step, player.asm ~1715)
+    has the exact same prefix with FREQMODL ($50) as the operand.
+    Disambiguate by checking the byte that immediately follows the
+    operand: WRPITCH continues with ``$08`` (php — editor MIDI build)
+    or ``$9D`` (sta abs,X — exported build), while ADDFREQ writes
+    back to ZP with ``$95`` (sta zp,X = ``sta FREQLO,X``).
 
-    Raises ``ValueError`` if the signature is not found.
+    Returns the ZP address of DETUNER_v0; per-voice stride is 7
+    (v1 = base+7, v2 = base+14).
+
+    Raises ``ValueError`` if no instance of the disambiguated
+    signature is found.
     """
-    for i in range(len(player_code) - 3):
+    # Continuation bytes that mark a real WRPITCH (vs ADDFREQ):
+    # - $08 = php   (editor build with MIDI_support inserts php; clc;
+    #         adc pitchShiftLo before the SID store)
+    # - $9D = sta abs,X (exported build stores directly to SIDG.FREQ+0)
+    WRPITCH_CONTINUATIONS = (0x08, 0x9D)
+    for i in range(len(player_code) - 4):
         if (
             player_code[i] == 0xB5  # lda zp,X
             and player_code[i + 1] == 0x10  # zp = $10 = FREQLO
             and player_code[i + 2] == 0x75  # adc zp,X
+            and player_code[i + 4] in WRPITCH_CONTINUATIONS
         ):
             detuner_zp = player_code[i + 3]
-            # Sanity: DETUNER must be in ZP (= < $100). Also rule out
-            # the obvious low-ZP region used by the per-voice VARIABLES
-            # block ($10..$5F) — DETUNER lives in CONST_VAR which is
-            # above ENDVARIABLES.
+            # Sanity: DETUNER must be in ZP. CONST_VAR lives above the
+            # VARIABLES block ($10..$5F); a match below that range is a
+            # false positive even after the continuation check.
             if 0x60 <= detuner_zp <= 0xFE:
                 return detuner_zp
             raise ValueError(
@@ -188,7 +202,9 @@ def find_detuner_base_addr(player_code: bytes, base_addr: int) -> int:
                 f"$60..$FE — likely a false-positive match at "
                 f"offset ${base_addr + i:04X}"
             )
-    raise ValueError("WRPITCH (lda FREQLO; adc DETUNER) signature not found")
+    raise ValueError(
+        "WRPITCH (lda FREQLO; adc DETUNER; php|sta-abs) signature " "not found in player code"
+    )
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

@@ -174,11 +174,25 @@ def _filter_signature_offset() -> int:
     return 0x40
 
 
-def _wrpitch_bytes(detuner_zp: int) -> bytes:
-    """``WRPITCH`` opening pair ``lda FREQLO,X ; adc DETUNER,X`` —
-    the signature :func:`find_detuner_base_addr` scans for. The DETUNER
-    operand byte holds the ZP address of DETUNER_v0."""
-    return bytes([0xB5, 0x10, 0x75, detuner_zp & 0xFF])
+def _wrpitch_bytes(detuner_zp: int, continuation: int = 0x9D) -> bytes:
+    """``WRPITCH`` opening sequence the discovery scans for::
+
+        B5 10           ; lda FREQLO,X
+        75 ??           ; adc DETUNER,X        (?? = DETUNER ZP addr)
+        9D ?? ??        ; sta SIDG.FREQ+0,X    (or $08 php in editor build)
+
+    The 5th byte disambiguates from ADDFREQ (which writes back to ZP
+    with $95). Default continuation is $9D (sta abs,X — exported
+    build); pass $08 for the editor + MIDI build (php; clc; adc
+    pitchShiftLo,X follows)."""
+    return bytes([0xB5, 0x10, 0x75, detuner_zp & 0xFF, continuation])
+
+
+def _addfreq_bytes(freqmod_zp: int = 0x50) -> bytes:
+    """``ADDFREQ`` opening — shares the ``B5 10 75 ??`` prefix with
+    WRPITCH but writes back to ZP via ``$95``. Discovery must NOT
+    pick this up as DETUNER."""
+    return bytes([0xB5, 0x10, 0x75, freqmod_zp & 0xFF, 0x95, 0x10])
 
 
 def _make_responder(
@@ -288,7 +302,7 @@ def test_find_detuner_base_addr_rejects_low_zp_operand():
     expected CONST_VAR window ($60..$FE), the match is suspicious — bail
     rather than seed pysidwizard from a low-ZP false positive."""
     block = bytearray(0x100)
-    block[0x30:0x34] = _wrpitch_bytes(detuner_zp=0x10)  # same as FREQLO_v0
+    block[0x30:0x35] = _wrpitch_bytes(detuner_zp=0x10)  # same as FREQLO_v0
     with pytest.raises(ValueError, match="outside the expected ZP range"):
         find_detuner_base_addr(bytes(block), 0x1000)
 
@@ -296,6 +310,33 @@ def test_find_detuner_base_addr_rejects_low_zp_operand():
 def test_find_detuner_base_addr_raises_on_missing_signature():
     with pytest.raises(ValueError, match="signature not found"):
         find_detuner_base_addr(bytes(0x800), 0x1000)
+
+
+def test_find_detuner_base_addr_skips_addfreq_lookalike():
+    """``ADDFREQ`` opens with ``B5 10 75 ??`` exactly like WRPITCH but
+    writes back to ZP via ``95 10`` instead of an absolute store. The
+    discovery must skip ADDFREQ and locate the real WRPITCH further on
+    in the code — otherwise it returns FREQMODL_v0 ($50) as
+    "DETUNER", which is a silent corruption with no easy diagnostic."""
+    base = 0x1000
+    block = bytearray(0x200)
+    # ADDFREQ-shaped lookalike first (lower offset).
+    block[0x20 : 0x20 + 6] = _addfreq_bytes(freqmod_zp=0x50)
+    # Real WRPITCH later, with DETUNER at $7A.
+    block[0x80 : 0x80 + 5] = _wrpitch_bytes(detuner_zp=0x7A)
+    assert find_detuner_base_addr(bytes(block), base) == 0x7A
+
+
+def test_find_detuner_base_addr_accepts_editor_php_continuation():
+    """The editor build with MIDI_support inserts ``php; clc; adc
+    pitchShiftLo,X`` between ``adc DETUNER,X`` and the SID store, so the
+    byte after the DETUNER operand is ``$08`` (php) rather than ``$9D``
+    (sta abs,X). Discovery must accept either."""
+    base = 0x1000
+    block = bytearray(0x100)
+    sig = _wrpitch_bytes(detuner_zp=0x7C, continuation=0x08)
+    block[0x40 : 0x40 + len(sig)] = sig
+    assert find_detuner_base_addr(bytes(block), base) == 0x7C
 
 
 def test_dump_loop_halts_at_player_entry_each_frame():
