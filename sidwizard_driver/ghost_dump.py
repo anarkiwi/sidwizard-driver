@@ -171,7 +171,7 @@ def find_detuner_base_addr(player_code: bytes, base_addr: int) -> int:
     """
     for i in range(len(player_code) - 3):
         if (
-            player_code[i] == 0xB5      # lda zp,X
+            player_code[i] == 0xB5  # lda zp,X
             and player_code[i + 1] == 0x10  # zp = $10 = FREQLO
             and player_code[i + 2] == 0x75  # adc zp,X
         ):
@@ -285,8 +285,11 @@ def _dump_loop(bm: BinMon, frames: int) -> tuple[
         selfmod_snapshots.append(sm_bytes)
         detuner_snapshots.append(det_bytes)
     return (
-        zp_snapshots, selfmod_addrs, selfmod_snapshots,
-        detuner_addrs, detuner_snapshots,
+        zp_snapshots,
+        selfmod_addrs,
+        selfmod_snapshots,
+        detuner_addrs,
+        detuner_snapshots,
     )
 
 
@@ -333,9 +336,7 @@ def _write_csv(
                     rows += 1
             if detuner_addrs is not None and detuner_snapshots is not None:
                 det_bytes = detuner_snapshots[snap_idx]
-                for addr, val, label in zip(
-                    detuner_addrs, det_bytes, DETUNER_LABELS, strict=True
-                ):
+                for addr, val, label in zip(detuner_addrs, det_bytes, DETUNER_LABELS, strict=True):
                     row = [frame, addr, val]
                     if annotate:
                         row.append(label)

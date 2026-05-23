@@ -224,7 +224,7 @@ def _make_responder(
         detuner_zp_base + 7,
         detuner_zp_base + 14,
     )
-    det_vals = dict(zip(detuner_addrs, detuner_vals))
+    det_vals = dict(zip(detuner_addrs, detuner_vals, strict=True))
 
     def responder(start, end):
         if start == SELFMOD_SCAN_START and end == SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1:
@@ -321,7 +321,11 @@ def test_dump_loop_halts_at_player_entry_each_frame():
     bm = _FakeBinMon(responder)
 
     (
-        zp_snaps, sm_addrs, sm_snaps, det_addrs, det_snaps,
+        zp_snaps,
+        sm_addrs,
+        sm_snaps,
+        det_addrs,
+        det_snaps,
     ) = _dump_loop(bm, frames=3)
     assert bm.pc_targets == [PLAYER_ENTRY, PLAYER_ENTRY, PLAYER_ENTRY]
     assert bm.halted_calls == 3
