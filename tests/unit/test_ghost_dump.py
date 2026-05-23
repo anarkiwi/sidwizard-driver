@@ -10,13 +10,66 @@ import pytest
 from sidwizard_driver.ghost_dump import (
     PER_VOICE_STRIDE,
     PLAYER_ENTRY,
+    SELFMOD_LABELS,
+    SELFMOD_SCAN_LEN,
+    SELFMOD_SCAN_START,
     ZP_DUMP_END,
     ZP_DUMP_START,
     _dump_loop,
     _parse_args,
     _write_csv,
     annotated_name,
+    find_filter_selfmod_addrs,
 )
+
+
+# 18-byte filter-program self-modifying signature placed at known
+# offsets inside a synthetic "player code" block — same byte layout the
+# real SID-Wizard 1.94 single-SID build emits inside FilterProgram. We
+# fill the rest of the block with $00 (BRK) so any false-positive scan
+# would have to re-form the entire signature.
+
+
+def _make_filter_signature(
+    fltctrl_val: int = 0x55,
+    fltposi_val: int = 0x66,
+    cwepcnt_val: int = 0x77,
+    inc_target: int = 0,  # caller fills with the expected CWEPCNT addr
+) -> bytes:
+    """Build the 18-byte FilterProgram instruction sequence with the
+    three self-modifying operand values + a trailing ``inc abs`` whose
+    target is the CWEPCNT operand byte. ``inc_target`` is the absolute
+    address of CWEPCNT+1 inside the host memory block."""
+    return bytes(
+        [
+            0xE0, fltctrl_val,        # cpx #imm (FLTCTRL)
+            0xD0, 0x10,               # bne SwUpEnd (dummy +$10)
+            0xA0, fltposi_val,        # ldy #imm (FLTPOSI)
+            0xB1, 0xFB,               # lda (PLAYERZP),y
+            0x30, 0x10,               # bmi NOCWEEP
+            0xC8,                     # iny (FISWEEP)
+            0xC9, cwepcnt_val,        # cmp #imm (CWEPCNT)
+            0xF0, 0x10,               # beq FLADVAN
+            0xEE, inc_target & 0xFF, (inc_target >> 8) & 0xFF,  # inc abs
+        ]
+    )
+
+
+def _embed_signature(
+    base_addr: int,
+    offset: int,
+    block_len: int = 0x1000,
+    **sig_kwargs,
+) -> bytes:
+    """Place the signature inside a zeroed block. ``inc_target`` is set
+    automatically so the self-consistency check inside
+    :func:`find_filter_selfmod_addrs` passes."""
+    block = bytearray(block_len)
+    # CWEPCNT operand lives at offset+12 (signature byte 12).
+    cwepcnt_addr = base_addr + offset + 12
+    sig = _make_filter_signature(inc_target=cwepcnt_addr, **sig_kwargs)
+    block[offset:offset + len(sig)] = sig
+    return bytes(block)
 
 
 def test_annotated_name_first_block_v0_v1_v2():
@@ -80,11 +133,14 @@ def test_parse_args_requires_d64_swm_out():
 
 
 class _FakeBinMon:
-    """Minimal BinMon stand-in for ``_dump_loop``: records run_until_pc
-    targets and serves canned ``mem_get`` payloads in order."""
+    """Minimal BinMon stand-in. ``mem_get_responder`` is a callable
+    ``(start, end) -> bytes`` that produces the bytes for each call —
+    lets a test stage one block as "the player code" and another as
+    "the ZP window" without queueing fragile per-call payloads.
+    """
 
-    def __init__(self, payloads):
-        self._payloads = list(payloads)
+    def __init__(self, mem_get_responder):
+        self._responder = mem_get_responder
         self.pc_targets: list[int] = []
         self.mem_calls: list[tuple[int, int]] = []
         self.halted_calls = 0
@@ -99,32 +155,118 @@ class _FakeBinMon:
 
     def mem_get(self, start, end):
         self.mem_calls.append((start, end))
-        return self._payloads.pop(0)
+        return self._responder(start, end)
+
+
+def _filter_signature_offset() -> int:
+    """A fixed in-block offset to place the signature. Picked so the
+    resulting absolute addresses fall well inside the scan window."""
+    return 0x40
+
+
+def _make_responder(zp_payload_fn, fltctrl_val, fltposi_val, cwepcnt_val):
+    """Build a mem_get responder that serves the player-code scan, the
+    per-frame ZP window, and the three per-frame selfmod byte reads.
+    """
+    sm_offset = _filter_signature_offset()
+    code_block = _embed_signature(
+        SELFMOD_SCAN_START, sm_offset,
+        fltctrl_val=fltctrl_val,
+        fltposi_val=fltposi_val,
+        cwepcnt_val=cwepcnt_val,
+    )
+    fltctrl_addr = SELFMOD_SCAN_START + sm_offset + 1
+    fltposi_addr = SELFMOD_SCAN_START + sm_offset + 5
+    cwepcnt_addr = SELFMOD_SCAN_START + sm_offset + 12
+    sm_vals = {
+        fltctrl_addr: fltctrl_val,
+        fltposi_addr: fltposi_val,
+        cwepcnt_addr: cwepcnt_val,
+    }
+
+    def responder(start, end):
+        if start == SELFMOD_SCAN_START and end == SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1:
+            return code_block
+        if start == ZP_DUMP_START and end == ZP_DUMP_END:
+            return zp_payload_fn()
+        if start == end and start in sm_vals:
+            return bytes([sm_vals[start]])
+        raise AssertionError(f"unexpected mem_get({start:#x}, {end:#x})")
+
+    return responder, (fltctrl_addr, fltposi_addr, cwepcnt_addr)
+
+
+def test_find_filter_selfmod_addrs_recovers_three_operands():
+    """The scan returns absolute addresses for FLTCTRL/FLTPOSI/CWEPCNT
+    operand bytes from a synthetic player-code block."""
+    base = 0x1000
+    offset = 0x80
+    code = _embed_signature(base, offset)
+    addrs = find_filter_selfmod_addrs(code, base)
+    assert addrs == (base + offset + 1, base + offset + 5, base + offset + 12)
+
+
+def test_find_filter_selfmod_addrs_raises_on_missing_signature():
+    """Without the 18-byte sequence the scan must error out — no
+    silent fallback that would later mis-seed the player."""
+    with pytest.raises(ValueError, match="signature not found"):
+        find_filter_selfmod_addrs(bytes(0x800), 0x1000)
+
+
+def test_find_filter_selfmod_addrs_rejects_inc_target_mismatch():
+    """If the trailing ``inc abs`` points somewhere other than the
+    computed CWEPCNT address, the signature is suspicious — bail
+    rather than report bogus addresses."""
+    base = 0x1000
+    offset = 0x40
+    block = bytearray(_embed_signature(base, offset))
+    # Corrupt the inc-abs target so the consistency check fails.
+    block[offset + 16] = 0xFF
+    block[offset + 17] = 0xFF
+    with pytest.raises(ValueError, match="disagrees"):
+        find_filter_selfmod_addrs(bytes(block), base)
 
 
 def test_dump_loop_halts_at_player_entry_each_frame():
-    """``_dump_loop`` must request a halt at PLAYER_ENTRY once per frame
-    and read the configured ZP window each time."""
+    """``_dump_loop`` halts at PLAYER_ENTRY per frame, reads the ZP
+    window, and (after first-frame discovery) reads each selfmod
+    operand byte."""
     width = ZP_DUMP_END - ZP_DUMP_START + 1
-    payloads = [bytes((i + frame) & 0xFF for i in range(width)) for frame in range(3)]
-    bm = _FakeBinMon(payloads)
-    snaps = _dump_loop(bm, frames=3)
+    counter = {"i": 0}
 
+    def zp_payload():
+        frame = counter["i"]
+        counter["i"] += 1
+        return bytes((i + frame) & 0xFF for i in range(width))
+
+    responder, expected_addrs = _make_responder(
+        zp_payload, fltctrl_val=0x0E, fltposi_val=0x10, cwepcnt_val=0x03,
+    )
+    bm = _FakeBinMon(responder)
+
+    zp_snaps, addrs, sm_snaps = _dump_loop(bm, frames=3)
     assert bm.pc_targets == [PLAYER_ENTRY, PLAYER_ENTRY, PLAYER_ENTRY]
-    assert bm.mem_calls == [(ZP_DUMP_START, ZP_DUMP_END)] * 3
     assert bm.halted_calls == 3
-    assert [frame for frame, _ in snaps] == [0, 1, 2]
-    assert all(len(buf) == width for _, buf in snaps)
-    assert snaps[0][1] == payloads[0]
+    assert addrs == expected_addrs
+    assert [frame for frame, _ in zp_snaps] == [0, 1, 2]
+    assert all(len(buf) == width for _, buf in zp_snaps)
+    # All three frames see the same self-mod values (the stubbed
+    # responder returns constants); pysidwizard only needs frame 0
+    # but the loop captures every frame for completeness.
+    assert sm_snaps == [bytes([0x0E, 0x10, 0x03])] * 3
 
 
 def test_dump_loop_zero_frames_is_noop():
-    bm = _FakeBinMon([])
-    assert _dump_loop(bm, frames=0) == []
+    bm = _FakeBinMon(lambda s, e: b"")
+    zp_snaps, addrs, sm_snaps = _dump_loop(bm, frames=0)
+    assert zp_snaps == []
+    assert addrs is None
+    assert sm_snaps == []
     assert bm.pc_targets == []
 
 
 def test_write_csv_no_annotate(tmp_path):
+    """ZP-only mode (no selfmod) preserves the original schema."""
     width = ZP_DUMP_END - ZP_DUMP_START + 1
     snaps = [
         (0, bytes(range(width))),
@@ -140,9 +282,7 @@ def test_write_csv_no_annotate(tmp_path):
         assert header == ["frame", "addr", "value"]
         body = list(reader)
     assert len(body) == 2 * width
-    # First data row should be (frame=0, addr=ZP_DUMP_START, value=0).
     assert body[0] == ["0", str(ZP_DUMP_START), "0"]
-    # Last frame-0 row should be at addr = ZP_DUMP_END.
     assert body[width - 1] == ["0", str(ZP_DUMP_END), str(width - 1)]
 
 
@@ -158,8 +298,63 @@ def test_write_csv_annotate_adds_label_column(tmp_path):
         header = next(reader)
         body = list(reader)
     assert header == ["frame", "addr", "value", "label"]
-    # FREQLO lives at $10 (v0) — first row, value zero, label populated.
     assert body[0] == ["0", str(ZP_DUMP_START), "0", "FREQLO_v0"]
-    # $25 is the only unlabelled byte in the first gap.
     gap_row = next(r for r in body if int(r[1]) == 0x25)
     assert gap_row[3] == ""
+
+
+def test_write_csv_with_selfmod_appends_three_rows_per_frame(tmp_path):
+    """When selfmod data is supplied, each frame gains exactly three
+    extra rows (FLTCTRL, FLTPOSI, CWEPCNT) at their player-code
+    addresses, between the ZP rows of consecutive frames."""
+    width = ZP_DUMP_END - ZP_DUMP_START + 1
+    snaps = [(0, bytes(width)), (1, bytes(width))]
+    selfmod_addrs = (0x1041, 0x1045, 0x104C)
+    selfmod_snaps = [bytes([0x0E, 0x10, 0x03]), bytes([0x0E, 0x13, 0x05])]
+    out = tmp_path / "ghost-sm.csv"
+    rows = _write_csv(
+        snaps, str(out), annotate=True,
+        selfmod_addrs=selfmod_addrs,
+        selfmod_snapshots=selfmod_snaps,
+    )
+    expected_per_frame = width + len(SELFMOD_LABELS)
+    assert rows == 2 * expected_per_frame
+
+    with open(out, newline="") as fp:
+        body = list(csv.reader(fp))[1:]
+
+    # Each frame's last 3 rows are the selfmod rows (after the ZP).
+    frame0_sm = body[width : width + 3]
+    assert frame0_sm == [
+        ["0", "4161", "14", "FLTCTRL"],  # $1041 = 4161
+        ["0", "4165", "16", "FLTPOSI"],  # $1045
+        ["0", "4172", "3", "CWEPCNT"],   # $104C
+    ]
+    frame1_start = expected_per_frame
+    frame1_sm = body[frame1_start + width : frame1_start + width + 3]
+    assert frame1_sm == [
+        ["1", "4161", "14", "FLTCTRL"],
+        ["1", "4165", "19", "FLTPOSI"],
+        ["1", "4172", "5", "CWEPCNT"],
+    ]
+
+
+def test_write_csv_with_selfmod_no_annotate_omits_label(tmp_path):
+    """Without ``annotate``, selfmod rows still appear but lack the
+    label column (matches the ZP rows' schema)."""
+    snaps = [(0, bytes(ZP_DUMP_END - ZP_DUMP_START + 1))]
+    selfmod_addrs = (0x1041, 0x1045, 0x104C)
+    selfmod_snaps = [bytes([1, 2, 3])]
+    out = tmp_path / "ghost-sm-noannot.csv"
+    _write_csv(
+        snaps, str(out), annotate=False,
+        selfmod_addrs=selfmod_addrs, selfmod_snapshots=selfmod_snaps,
+    )
+    with open(out, newline="") as fp:
+        body = list(csv.reader(fp))[1:]
+    last_three = body[-3:]
+    assert [row[1:] for row in last_three] == [
+        ["4161", "1"],
+        ["4165", "2"],
+        ["4172", "3"],
+    ]

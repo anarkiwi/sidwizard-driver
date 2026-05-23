@@ -28,6 +28,19 @@ VICE_STATE_DIR = "/root/.local/state/vice"
 ZP_DUMP_START = 0x10
 ZP_DUMP_END = 0x80
 
+# Range scanned for SID-Wizard's filter-program self-modifying operands
+# (FLTCTRL / FLTPOSI / CWEPCNT). The 1-SID editor build's player code
+# lives between $1000 and ~$1FFF; the FilterProgram macro is emitted
+# once, somewhere in that block. We start a few bytes past the
+# jump-table to skip the inisub/playsub/mulpsub stubs.
+SELFMOD_SCAN_START = 0x1010
+SELFMOD_SCAN_LEN = 0x1000
+
+# Labels for the extra player-code bytes carried in the ghost CSV
+# alongside the ZP dump. These point at the operand byte of a
+# self-modifying instruction (= 1 byte past the opcode).
+SELFMOD_LABELS = ("FLTCTRL", "FLTPOSI", "CWEPCNT")
+
 
 # Variable name map for the per-voice zero-page region. Labels are for
 # v0; v1 = +7, v2 = +14. Gaps are left unannotated but still dumped.
@@ -76,6 +89,64 @@ def annotated_name(addr: int) -> str:
     return ""
 
 
+def find_filter_selfmod_addrs(player_code: bytes, base_addr: int) -> tuple[int, int, int]:
+    """Locate SID-Wizard's filter-program self-modifying operand bytes
+    inside a dump of the loaded player code.
+
+    SID-Wizard's player.asm (FilterProgram macro) emits this unique
+    instruction sequence inside its filter routine::
+
+        FLTCTRL cpx #selfmod    ; E0 ??
+                bne SwUpEnd     ; D0 ??
+        FLTPOSI ldy #selfmod    ; A0 ??
+                lda (PLAYERZP),y ; B1 ??
+                bmi NOCWEEP     ; 30 ??
+        FISWEEP iny             ; C8
+        CWEPCNT cmp #selfmod    ; C9 ??
+                beq FLADVAN     ; F0 ??
+                inc CWEPCNT+1   ; EE LO HI
+
+    The 18-byte signature (with three wildcard operands and a free
+    relative branch) is unique enough in the player code that scanning
+    locates it reliably. The trailing ``inc CWEPCNT+1`` doubles as a
+    sanity check: the absolute target of the ``inc`` must equal the
+    address we computed for the CWEPCNT operand.
+
+    Returns ``(fltctrl_addr, fltposi_addr, cwepcnt_addr)`` — the
+    absolute addresses of the THREE self-modifying operand bytes,
+    each one byte past its respective opcode.
+
+    Raises ``ValueError`` if the signature is not found, or if the
+    ``inc`` sanity check disagrees.
+    """
+    for i in range(len(player_code) - 17):
+        if (
+            player_code[i] == 0xE0       # cpx #imm
+            and player_code[i + 2] == 0xD0  # bne rel
+            and player_code[i + 4] == 0xA0  # ldy #imm
+            and player_code[i + 6] == 0xB1  # lda (zp),y
+            and player_code[i + 8] == 0x30  # bmi rel
+            and player_code[i + 10] == 0xC8  # iny
+            and player_code[i + 11] == 0xC9  # cmp #imm
+            and player_code[i + 13] == 0xF0  # beq rel
+            and player_code[i + 15] == 0xEE  # inc abs
+        ):
+            fltctrl = base_addr + i + 1
+            fltposi = base_addr + i + 5
+            cwepcnt = base_addr + i + 12
+            inc_target = player_code[i + 16] | (player_code[i + 17] << 8)
+            if inc_target != cwepcnt:
+                raise ValueError(
+                    f"FLTPOSI signature matched at offset {i} but the "
+                    f"`inc abs` target ${inc_target:04X} disagrees with the "
+                    f"computed CWEPCNT address ${cwepcnt:04X}"
+                )
+            return fltctrl, fltposi, cwepcnt
+    raise ValueError(
+        "filter-program self-mod signature not found in player code"
+    )
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--d64", default=None, help="SID-Wizard editor .d64 (auto-fetched if omitted)")
@@ -96,21 +167,76 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _dump_loop(bm: BinMon, frames: int) -> list[tuple[int, bytes]]:
-    snapshots: list[tuple[int, bytes]] = []
+def _discover_selfmod_addrs(bm: BinMon) -> tuple[int, int, int]:
+    """Read the player code from VICE and locate FLTCTRL / FLTPOSI /
+    CWEPCNT. Wrapper around :func:`find_filter_selfmod_addrs` that
+    handles the live ``BinMon`` read.
+
+    Must be called while VICE is halted (typical caller is
+    ``_dump_loop`` between the first ``run_until_pc`` and the first ZP
+    capture).
+    """
+    code = bm.mem_get(
+        SELFMOD_SCAN_START, SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1
+    )
+    return find_filter_selfmod_addrs(bytes(code), SELFMOD_SCAN_START)
+
+
+def _dump_loop(bm: BinMon, frames: int) -> tuple[
+    list[tuple[int, bytes]],
+    "tuple[int, int, int] | None",
+    list[bytes],
+]:
+    """Run ``frames`` PLAYER ticks; capture ZP + filter self-mod bytes
+    per frame.
+
+    Returns ``(zp_snapshots, selfmod_addrs, selfmod_snapshots)``:
+
+    * ``zp_snapshots`` — ``[(frame, zp_bytes), ...]`` (per-frame ZP
+      window, same as before).
+    * ``selfmod_addrs`` — ``(fltctrl_addr, fltposi_addr, cwepcnt_addr)``
+      or ``None`` if discovery was skipped (frames=0).
+    * ``selfmod_snapshots`` — list of length ``frames``; each entry is
+      a 3-byte sequence ``(fltctrl_val, fltposi_val, cwepcnt_val)`` for
+      that frame.
+    """
+    zp_snapshots: list[tuple[int, bytes]] = []
+    selfmod_snapshots: list[bytes] = []
+    selfmod_addrs: "tuple[int, int, int] | None" = None
     for frame in range(frames):
         bm.run_until_pc(PLAYER_ENTRY)
         with bm.halted():
+            if selfmod_addrs is None:
+                selfmod_addrs = _discover_selfmod_addrs(bm)
             zp = bm.mem_get(ZP_DUMP_START, ZP_DUMP_END)
-        snapshots.append((frame, bytes(zp)))
-    return snapshots
+            # Read each self-mod operand byte. They are scattered in
+            # $1xxx, so a single mem_get range isn't economical;
+            # one read per byte is fine (only runs once per frame).
+            sm_bytes = bytes(
+                bm.mem_get(addr, addr)[0] for addr in selfmod_addrs
+            )
+        zp_snapshots.append((frame, bytes(zp)))
+        selfmod_snapshots.append(sm_bytes)
+    return zp_snapshots, selfmod_addrs, selfmod_snapshots
 
 
 def _write_csv(
-    snapshots: list[tuple[int, bytes]],
+    zp_snapshots: list[tuple[int, bytes]],
     out_path: str,
     annotate: bool,
+    selfmod_addrs: "tuple[int, int, int] | None" = None,
+    selfmod_snapshots: "list[bytes] | None" = None,
 ) -> int:
+    """Write the per-frame ghost dump to CSV.
+
+    Each frame produces (ZP-byte-count) rows for the ZP window plus,
+    when ``selfmod_addrs`` is provided, three additional rows for the
+    FLTCTRL / FLTPOSI / CWEPCNT player-code operand bytes. The new
+    rows use the same ``frame,addr,value[,label]`` schema as the ZP
+    rows; their addresses are in the $1xxx player-code range and the
+    labels (when ``annotate=True``) are ``FLTCTRL`` / ``FLTPOSI`` /
+    ``CWEPCNT``.
+    """
     rows = 0
     with open(out_path, "w", newline="") as fp:
         w = csv.writer(fp)
@@ -118,7 +244,7 @@ def _write_csv(
         if annotate:
             header.append("label")
         w.writerow(header)
-        for frame, data in snapshots:
+        for snap_idx, (frame, data) in enumerate(zp_snapshots):
             for i, val in enumerate(data):
                 addr = ZP_DUMP_START + i
                 row: list[object] = [frame, addr, val]
@@ -126,6 +252,16 @@ def _write_csv(
                     row.append(annotated_name(addr))
                 w.writerow(row)
                 rows += 1
+            if selfmod_addrs is not None and selfmod_snapshots is not None:
+                sm_bytes = selfmod_snapshots[snap_idx]
+                for addr, val, label in zip(
+                    selfmod_addrs, sm_bytes, SELFMOD_LABELS
+                ):
+                    row = [frame, addr, val]
+                    if annotate:
+                        row.append(label)
+                    w.writerow(row)
+                    rows += 1
     return rows
 
 
@@ -192,7 +328,15 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
                     sw.clear_sid_registers()
                 bm.checkpoint_delete(pre_cp.checknum)
 
-                snapshots = _dump_loop(bm, args.frames)
+                zp_snapshots, selfmod_addrs, selfmod_snapshots = _dump_loop(
+                    bm, args.frames,
+                )
+                if selfmod_addrs is not None:
+                    log.info(
+                        "filter self-mod addrs: FLTCTRL=$%04X FLTPOSI=$%04X "
+                        "CWEPCNT=$%04X",
+                        *selfmod_addrs,
+                    )
 
     except ViceContainerError as e:
         print(f"VICE container error: {e}", file=sys.stderr)
@@ -201,7 +345,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
         print(f"SID-Wizard error: {e}", file=sys.stderr)
         return 5
 
-    rows = _write_csv(snapshots, args.out, annotate=args.annotate)
+    rows = _write_csv(
+        zp_snapshots, args.out, annotate=args.annotate,
+        selfmod_addrs=selfmod_addrs, selfmod_snapshots=selfmod_snapshots,
+    )
     print(f"wrote {rows} rows to {args.out} (workdir preserved at {host_work_dir})")
     return 0
 
