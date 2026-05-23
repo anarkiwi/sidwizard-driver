@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sidwizard-driver"
+version = "0.2.0"
+description = "Python automation harness for driving SID-Wizard inside asid-vice — captures per-frame SID register writes from the real 6502 player."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "anarkiwi" },
+]
+keywords = [
+    "c64",
+    "commodore-64",
+    "sid-wizard",
+    "sidwizard",
+    "vice",
+    "asid-vice",
+    "sid",
+    "music",
+    "emulator",
+    "automation",
+    "binary-monitor",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Emulators",
+]
+dependencies = [
+    "vice-driver>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "pyright>=1.1.350",
+    "black>=24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/anarkiwi/sidwizard-driver"
+Issues = "https://github.com/anarkiwi/sidwizard-driver/issues"
+Source = "https://github.com/anarkiwi/sidwizard-driver"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sidwizard_driver*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+sidwizard_driver = ["fixtures/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["-ra", "--strict-markers"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+ignore = [
+    "E501",
+    "E741",
+    "B008",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.coverage.run]
+branch = true
+source = ["sidwizard_driver"]
+omit = [
+    # Smoke is an integration entry point that boots the VICE container.
+    # It has no unit-testable surface; the meaningful coverage on the
+    # rest of the driver is measured against the testable modules.
+    "sidwizard_driver/smoke.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false

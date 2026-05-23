@@ -1,0 +1,13 @@
+{
+  "include": ["sidwizard_driver", "tests"],
+  "exclude": ["**/__pycache__", ".venv", "dist", "build"],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "reportGeneralTypeIssues": "warning",
+  "reportArgumentType": "warning",
+  "reportAttributeAccessIssue": "warning",
+  "reportUnusedImport": "none",
+  "reportUnusedVariable": "none"
+}
