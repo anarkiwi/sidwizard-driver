@@ -41,6 +41,14 @@ SELFMOD_SCAN_LEN = 0x1000
 # self-modifying instruction (= 1 byte past the opcode).
 SELFMOD_LABELS = ("FLTCTRL", "FLTPOSI", "CWEPCNT")
 
+# Per-voice DETUNER labels. DETUNER lives in SID-Wizard's CONST_VAR
+# region (= ZP, not part of the INIPVAR-cleared VARIABLES). It's read
+# by WRPITCH as part of the ``adc DETUNER,x`` 8-bit ADC chain that
+# produces the SID FREQ_LO write. Its base ZP address is build-dependent
+# (CONST_VAR placement varies with feature flags), so we discover it
+# from the WRPITCH instruction byte sequence.
+DETUNER_LABELS = ("DETUNER_v0", "DETUNER_v1", "DETUNER_v2")
+
 
 # Variable name map for the per-voice zero-page region. Labels are for
 # v0; v1 = +7, v2 = +14. Gaps are left unannotated but still dumped.
@@ -145,6 +153,44 @@ def find_filter_selfmod_addrs(player_code: bytes, base_addr: int) -> tuple[int, 
     raise ValueError("filter-program self-mod signature not found in player code")
 
 
+def find_detuner_base_addr(player_code: bytes, base_addr: int) -> int:
+    """Locate the ZP address of ``DETUNER`` (v0) inside a dump of the
+    loaded player code.
+
+    SID-Wizard's player.asm WRPITCH (line ~2051) begins::
+
+        WRPITCH lda FREQLO,x       ; B5 10  (zp,X — FREQLO at $10)
+                adc DETUNER,x      ; 75 ??  (zp,X — ?? is DETUNER's ZP addr)
+
+    The pair ``B5 10 75 ??`` is unique to WRPITCH in the player code
+    (no other site does ``lda $10,X ; adc <zp>,X``). Returns the
+    discovered ZP address of DETUNER_v0; the per-voice stride is 7 so
+    v1 = base+7, v2 = base+14.
+
+    Raises ``ValueError`` if the signature is not found.
+    """
+    for i in range(len(player_code) - 3):
+        if (
+            player_code[i] == 0xB5      # lda zp,X
+            and player_code[i + 1] == 0x10  # zp = $10 = FREQLO
+            and player_code[i + 2] == 0x75  # adc zp,X
+        ):
+            detuner_zp = player_code[i + 3]
+            # Sanity: DETUNER must be in ZP (= < $100). Also rule out
+            # the obvious low-ZP region used by the per-voice VARIABLES
+            # block ($10..$5F) — DETUNER lives in CONST_VAR which is
+            # above ENDVARIABLES.
+            if 0x60 <= detuner_zp <= 0xFE:
+                return detuner_zp
+            raise ValueError(
+                f"WRPITCH signature matched but DETUNER operand "
+                f"${detuner_zp:02X} is outside the expected ZP range "
+                f"$60..$FE — likely a false-positive match at "
+                f"offset ${base_addr + i:04X}"
+            )
+    raise ValueError("WRPITCH (lda FREQLO; adc DETUNER) signature not found")
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--d64", default=None, help="SID-Wizard editor .d64 (auto-fetched if omitted)")
@@ -178,15 +224,33 @@ def _discover_selfmod_addrs(bm: BinMon) -> tuple[int, int, int]:
     return find_filter_selfmod_addrs(bytes(code), SELFMOD_SCAN_START)
 
 
+def _discover_detuner_addrs(bm: BinMon) -> tuple[int, int, int]:
+    """Read the player code from VICE and locate the per-voice DETUNER
+    ZP addresses. Returns ``(DETUNER_v0, DETUNER_v1, DETUNER_v2)`` —
+    stride 7 starting from the base discovered via
+    :func:`find_detuner_base_addr`.
+
+    Must be called while VICE is halted (typical caller is
+    ``_dump_loop`` between the first ``run_until_pc`` and the first ZP
+    capture).
+    """
+    code = bm.mem_get(SELFMOD_SCAN_START, SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1)
+    base = find_detuner_base_addr(bytes(code), SELFMOD_SCAN_START)
+    return base, base + 7, base + 14
+
+
 def _dump_loop(bm: BinMon, frames: int) -> tuple[
     list[tuple[int, bytes]],
     "tuple[int, int, int] | None",
     list[bytes],
+    "tuple[int, int, int] | None",
+    list[bytes],
 ]:
     """Run ``frames`` PLAYER ticks; capture ZP + filter self-mod bytes
-    per frame.
+    + per-voice DETUNER bytes per frame.
 
-    Returns ``(zp_snapshots, selfmod_addrs, selfmod_snapshots)``:
+    Returns ``(zp_snapshots, selfmod_addrs, selfmod_snapshots,
+    detuner_addrs, detuner_snapshots)``:
 
     * ``zp_snapshots`` — ``[(frame, zp_bytes), ...]`` (per-frame ZP
       window, same as before).
@@ -195,23 +259,35 @@ def _dump_loop(bm: BinMon, frames: int) -> tuple[
     * ``selfmod_snapshots`` — list of length ``frames``; each entry is
       a 3-byte sequence ``(fltctrl_val, fltposi_val, cwepcnt_val)`` for
       that frame.
+    * ``detuner_addrs`` — ``(DETUNER_v0_zp, DETUNER_v1_zp,
+      DETUNER_v2_zp)`` or ``None``. These are ZP addresses (in $60..$FE)
+      discovered from the WRPITCH instruction's ``adc DETUNER,X``
+      operand.
+    * ``detuner_snapshots`` — list of length ``frames``; each entry is
+      a 3-byte ``(DETUNER_v0, DETUNER_v1, DETUNER_v2)`` capture.
     """
     zp_snapshots: list[tuple[int, bytes]] = []
     selfmod_snapshots: list[bytes] = []
+    detuner_snapshots: list[bytes] = []
     selfmod_addrs: "tuple[int, int, int] | None" = None
+    detuner_addrs: "tuple[int, int, int] | None" = None
     for frame in range(frames):
         bm.run_until_pc(PLAYER_ENTRY)
         with bm.halted():
             if selfmod_addrs is None:
                 selfmod_addrs = _discover_selfmod_addrs(bm)
+            if detuner_addrs is None:
+                detuner_addrs = _discover_detuner_addrs(bm)
             zp = bm.mem_get(ZP_DUMP_START, ZP_DUMP_END)
-            # Read each self-mod operand byte. They are scattered in
-            # $1xxx, so a single mem_get range isn't economical;
-            # one read per byte is fine (only runs once per frame).
             sm_bytes = bytes(bm.mem_get(addr, addr)[0] for addr in selfmod_addrs)
+            det_bytes = bytes(bm.mem_get(addr, addr)[0] for addr in detuner_addrs)
         zp_snapshots.append((frame, bytes(zp)))
         selfmod_snapshots.append(sm_bytes)
-    return zp_snapshots, selfmod_addrs, selfmod_snapshots
+        detuner_snapshots.append(det_bytes)
+    return (
+        zp_snapshots, selfmod_addrs, selfmod_snapshots,
+        detuner_addrs, detuner_snapshots,
+    )
 
 
 def _write_csv(
@@ -220,16 +296,17 @@ def _write_csv(
     annotate: bool,
     selfmod_addrs: "tuple[int, int, int] | None" = None,
     selfmod_snapshots: "list[bytes] | None" = None,
+    detuner_addrs: "tuple[int, int, int] | None" = None,
+    detuner_snapshots: "list[bytes] | None" = None,
 ) -> int:
     """Write the per-frame ghost dump to CSV.
 
     Each frame produces (ZP-byte-count) rows for the ZP window plus,
     when ``selfmod_addrs`` is provided, three additional rows for the
-    FLTCTRL / FLTPOSI / CWEPCNT player-code operand bytes. The new
-    rows use the same ``frame,addr,value[,label]`` schema as the ZP
-    rows; their addresses are in the $1xxx player-code range and the
-    labels (when ``annotate=True``) are ``FLTCTRL`` / ``FLTPOSI`` /
-    ``CWEPCNT``.
+    FLTCTRL / FLTPOSI / CWEPCNT player-code operand bytes. When
+    ``detuner_addrs`` is provided, three more rows for the per-voice
+    DETUNER ZP values. All extra rows use the same
+    ``frame,addr,value[,label]`` schema as the ZP rows.
     """
     rows = 0
     with open(out_path, "w", newline="") as fp:
@@ -249,6 +326,16 @@ def _write_csv(
             if selfmod_addrs is not None and selfmod_snapshots is not None:
                 sm_bytes = selfmod_snapshots[snap_idx]
                 for addr, val, label in zip(selfmod_addrs, sm_bytes, SELFMOD_LABELS, strict=True):
+                    row = [frame, addr, val]
+                    if annotate:
+                        row.append(label)
+                    w.writerow(row)
+                    rows += 1
+            if detuner_addrs is not None and detuner_snapshots is not None:
+                det_bytes = detuner_snapshots[snap_idx]
+                for addr, val, label in zip(
+                    detuner_addrs, det_bytes, DETUNER_LABELS, strict=True
+                ):
                     row = [frame, addr, val]
                     if annotate:
                         row.append(label)
@@ -320,14 +407,22 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
                     sw.clear_sid_registers()
                 bm.checkpoint_delete(pre_cp.checknum)
 
-                zp_snapshots, selfmod_addrs, selfmod_snapshots = _dump_loop(
-                    bm,
-                    args.frames,
-                )
+                (
+                    zp_snapshots,
+                    selfmod_addrs,
+                    selfmod_snapshots,
+                    detuner_addrs,
+                    detuner_snapshots,
+                ) = _dump_loop(bm, args.frames)
                 if selfmod_addrs is not None:
                     log.info(
                         "filter self-mod addrs: FLTCTRL=$%04X FLTPOSI=$%04X " "CWEPCNT=$%04X",
                         *selfmod_addrs,
+                    )
+                if detuner_addrs is not None:
+                    log.info(
+                        "DETUNER ZP addrs: v0=$%02X v1=$%02X v2=$%02X",
+                        *detuner_addrs,
                     )
 
     except ViceContainerError as e:
@@ -343,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
         annotate=args.annotate,
         selfmod_addrs=selfmod_addrs,
         selfmod_snapshots=selfmod_snapshots,
+        detuner_addrs=detuner_addrs,
+        detuner_snapshots=detuner_snapshots,
     )
     print(f"wrote {rows} rows to {args.out} (workdir preserved at {host_work_dir})")
     return 0

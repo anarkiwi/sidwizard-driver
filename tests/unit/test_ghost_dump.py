@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import pytest
 
 from sidwizard_driver.ghost_dump import (
+    DETUNER_LABELS,
     PER_VOICE_STRIDE,
     PLAYER_ENTRY,
     SELFMOD_LABELS,
@@ -19,6 +20,7 @@ from sidwizard_driver.ghost_dump import (
     _parse_args,
     _write_csv,
     annotated_name,
+    find_detuner_base_addr,
     find_filter_selfmod_addrs,
 )
 
@@ -172,18 +174,43 @@ def _filter_signature_offset() -> int:
     return 0x40
 
 
-def _make_responder(zp_payload_fn, fltctrl_val, fltposi_val, cwepcnt_val):
-    """Build a mem_get responder that serves the player-code scan, the
-    per-frame ZP window, and the three per-frame selfmod byte reads.
+def _wrpitch_bytes(detuner_zp: int) -> bytes:
+    """``WRPITCH`` opening pair ``lda FREQLO,X ; adc DETUNER,X`` —
+    the signature :func:`find_detuner_base_addr` scans for. The DETUNER
+    operand byte holds the ZP address of DETUNER_v0."""
+    return bytes([0xB5, 0x10, 0x75, detuner_zp & 0xFF])
+
+
+def _make_responder(
+    zp_payload_fn,
+    fltctrl_val,
+    fltposi_val,
+    cwepcnt_val,
+    detuner_zp_base: int = 0x70,
+    detuner_vals: tuple[int, int, int] = (0x01, 0x02, 0x03),
+):
+    """Build a mem_get responder that serves:
+
+    * the player-code scan (FilterProgram signature + WRPITCH signature),
+    * the per-frame ZP window,
+    * the three per-frame self-mod operand byte reads, and
+    * the three per-frame DETUNER (per-voice) byte reads.
     """
     sm_offset = _filter_signature_offset()
-    code_block = _embed_signature(
-        SELFMOD_SCAN_START,
-        sm_offset,
-        fltctrl_val=fltctrl_val,
-        fltposi_val=fltposi_val,
-        cwepcnt_val=cwepcnt_val,
+    wrpitch_offset = sm_offset + 32  # well clear of the filter signature
+    code_block = bytearray(
+        _embed_signature(
+            SELFMOD_SCAN_START,
+            sm_offset,
+            fltctrl_val=fltctrl_val,
+            fltposi_val=fltposi_val,
+            cwepcnt_val=cwepcnt_val,
+        )
     )
+    # Drop the WRPITCH B5 10 75 ?? pattern at a distinct offset.
+    wp = _wrpitch_bytes(detuner_zp_base)
+    code_block[wrpitch_offset : wrpitch_offset + len(wp)] = wp
+
     fltctrl_addr = SELFMOD_SCAN_START + sm_offset + 1
     fltposi_addr = SELFMOD_SCAN_START + sm_offset + 5
     cwepcnt_addr = SELFMOD_SCAN_START + sm_offset + 12
@@ -192,17 +219,25 @@ def _make_responder(zp_payload_fn, fltctrl_val, fltposi_val, cwepcnt_val):
         fltposi_addr: fltposi_val,
         cwepcnt_addr: cwepcnt_val,
     }
+    detuner_addrs = (
+        detuner_zp_base,
+        detuner_zp_base + 7,
+        detuner_zp_base + 14,
+    )
+    det_vals = dict(zip(detuner_addrs, detuner_vals))
 
     def responder(start, end):
         if start == SELFMOD_SCAN_START and end == SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1:
-            return code_block
+            return bytes(code_block)
         if start == ZP_DUMP_START and end == ZP_DUMP_END:
             return zp_payload_fn()
         if start == end and start in sm_vals:
             return bytes([sm_vals[start]])
+        if start == end and start in det_vals:
+            return bytes([det_vals[start]])
         raise AssertionError(f"unexpected mem_get({start:#x}, {end:#x})")
 
-    return responder, (fltctrl_addr, fltposi_addr, cwepcnt_addr)
+    return responder, (fltctrl_addr, fltposi_addr, cwepcnt_addr), detuner_addrs
 
 
 def test_find_filter_selfmod_addrs_recovers_three_operands():
@@ -236,10 +271,37 @@ def test_find_filter_selfmod_addrs_rejects_inc_target_mismatch():
         find_filter_selfmod_addrs(bytes(block), base)
 
 
+def test_find_detuner_base_addr_recovers_zp_address():
+    """``find_detuner_base_addr`` reads the operand byte of WRPITCH's
+    ``adc DETUNER,X`` instruction, which encodes the ZP address of
+    DETUNER_v0."""
+    base = 0x1000
+    block = bytearray(0x100)
+    # Drop the WRPITCH signature at offset 0x30.
+    sig = _wrpitch_bytes(detuner_zp=0x7A)
+    block[0x30 : 0x30 + len(sig)] = sig
+    assert find_detuner_base_addr(bytes(block), base) == 0x7A
+
+
+def test_find_detuner_base_addr_rejects_low_zp_operand():
+    """If the signature matches but the operand byte is below the
+    expected CONST_VAR window ($60..$FE), the match is suspicious — bail
+    rather than seed pysidwizard from a low-ZP false positive."""
+    block = bytearray(0x100)
+    block[0x30:0x34] = _wrpitch_bytes(detuner_zp=0x10)  # same as FREQLO_v0
+    with pytest.raises(ValueError, match="outside the expected ZP range"):
+        find_detuner_base_addr(bytes(block), 0x1000)
+
+
+def test_find_detuner_base_addr_raises_on_missing_signature():
+    with pytest.raises(ValueError, match="signature not found"):
+        find_detuner_base_addr(bytes(0x800), 0x1000)
+
+
 def test_dump_loop_halts_at_player_entry_each_frame():
     """``_dump_loop`` halts at PLAYER_ENTRY per frame, reads the ZP
-    window, and (after first-frame discovery) reads each selfmod
-    operand byte."""
+    window, and (after first-frame discovery) reads each selfmod +
+    per-voice DETUNER byte."""
     width = ZP_DUMP_END - ZP_DUMP_START + 1
     counter = {"i": 0}
 
@@ -248,32 +310,40 @@ def test_dump_loop_halts_at_player_entry_each_frame():
         counter["i"] += 1
         return bytes((i + frame) & 0xFF for i in range(width))
 
-    responder, expected_addrs = _make_responder(
+    responder, expected_sm, expected_det = _make_responder(
         zp_payload,
         fltctrl_val=0x0E,
         fltposi_val=0x10,
         cwepcnt_val=0x03,
+        detuner_zp_base=0x7A,
+        detuner_vals=(0x01, 0x02, 0x03),
     )
     bm = _FakeBinMon(responder)
 
-    zp_snaps, addrs, sm_snaps = _dump_loop(bm, frames=3)
+    (
+        zp_snaps, sm_addrs, sm_snaps, det_addrs, det_snaps,
+    ) = _dump_loop(bm, frames=3)
     assert bm.pc_targets == [PLAYER_ENTRY, PLAYER_ENTRY, PLAYER_ENTRY]
     assert bm.halted_calls == 3
-    assert addrs == expected_addrs
+    assert sm_addrs == expected_sm
+    assert det_addrs == expected_det
     assert [frame for frame, _ in zp_snaps] == [0, 1, 2]
     assert all(len(buf) == width for _, buf in zp_snaps)
-    # All three frames see the same self-mod values (the stubbed
-    # responder returns constants); pysidwizard only needs frame 0
-    # but the loop captures every frame for completeness.
+    # All three frames see the same self-mod / DETUNER values (the
+    # stubbed responder returns constants); pysidwizard only needs
+    # frame 0 but the loop captures every frame for completeness.
     assert sm_snaps == [bytes([0x0E, 0x10, 0x03])] * 3
+    assert det_snaps == [bytes([0x01, 0x02, 0x03])] * 3
 
 
 def test_dump_loop_zero_frames_is_noop():
     bm = _FakeBinMon(lambda s, e: b"")
-    zp_snaps, addrs, sm_snaps = _dump_loop(bm, frames=0)
+    zp_snaps, sm_addrs, sm_snaps, det_addrs, det_snaps = _dump_loop(bm, frames=0)
     assert zp_snaps == []
-    assert addrs is None
+    assert sm_addrs is None
     assert sm_snaps == []
+    assert det_addrs is None
+    assert det_snaps == []
     assert bm.pc_targets == []
 
 
@@ -374,4 +444,71 @@ def test_write_csv_with_selfmod_no_annotate_omits_label(tmp_path):
         ["4161", "1"],
         ["4165", "2"],
         ["4172", "3"],
+    ]
+
+
+def test_write_csv_with_detuner_appends_three_more_rows_per_frame(tmp_path):
+    """With both selfmod and DETUNER data, each frame gains 3+3=6 extra
+    rows after the ZP block, in (FLTCTRL/FLTPOSI/CWEPCNT) then
+    (DETUNER_v0/_v1/_v2) order."""
+    width = ZP_DUMP_END - ZP_DUMP_START + 1
+    snaps = [(0, bytes(width)), (1, bytes(width))]
+    selfmod_addrs = (0x1041, 0x1045, 0x104C)
+    selfmod_snaps = [bytes([0x0E, 0x10, 0x03]), bytes([0x0E, 0x13, 0x05])]
+    detuner_addrs = (0x7A, 0x81, 0x88)  # base, +7, +14
+    detuner_snaps = [bytes([0x01, 0x02, 0x03]), bytes([0x04, 0x05, 0x06])]
+    out = tmp_path / "ghost-det.csv"
+    rows = _write_csv(
+        snaps,
+        str(out),
+        annotate=True,
+        selfmod_addrs=selfmod_addrs,
+        selfmod_snapshots=selfmod_snaps,
+        detuner_addrs=detuner_addrs,
+        detuner_snapshots=detuner_snaps,
+    )
+    expected_per_frame = width + len(SELFMOD_LABELS) + len(DETUNER_LABELS)
+    assert rows == 2 * expected_per_frame
+
+    with open(out, newline="") as fp:
+        body = list(csv.reader(fp))[1:]
+
+    # Frame 0's DETUNER rows come after the selfmod rows (= last 3).
+    frame0_det = body[width + 3 : width + 6]
+    assert frame0_det == [
+        ["0", "122", "1", "DETUNER_v0"],  # $7A = 122
+        ["0", "129", "2", "DETUNER_v1"],  # $81 = 129
+        ["0", "136", "3", "DETUNER_v2"],  # $88 = 136
+    ]
+    frame1_start = expected_per_frame
+    frame1_det = body[frame1_start + width + 3 : frame1_start + width + 6]
+    assert frame1_det == [
+        ["1", "122", "4", "DETUNER_v0"],
+        ["1", "129", "5", "DETUNER_v1"],
+        ["1", "136", "6", "DETUNER_v2"],
+    ]
+
+
+def test_write_csv_detuner_only_without_selfmod(tmp_path):
+    """DETUNER rows can stand alone (selfmod_addrs=None) — they still
+    write after the ZP block at the discovered ZP addresses."""
+    width = ZP_DUMP_END - ZP_DUMP_START + 1
+    snaps = [(0, bytes(width))]
+    detuner_addrs = (0x7A, 0x81, 0x88)
+    detuner_snaps = [bytes([0x11, 0x22, 0x33])]
+    out = tmp_path / "ghost-det-only.csv"
+    rows = _write_csv(
+        snaps,
+        str(out),
+        annotate=True,
+        detuner_addrs=detuner_addrs,
+        detuner_snapshots=detuner_snaps,
+    )
+    assert rows == width + len(DETUNER_LABELS)
+    with open(out, newline="") as fp:
+        body = list(csv.reader(fp))[1:]
+    assert body[-3:] == [
+        ["0", "122", "17", "DETUNER_v0"],
+        ["0", "129", "34", "DETUNER_v1"],
+        ["0", "136", "51", "DETUNER_v2"],
     ]

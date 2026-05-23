@@ -55,11 +55,17 @@ collapsed.
 
 `ghost_dump` emits `frame,addr,value` (with optional `label` column).
 Each frame yields rows for the per-voice zero-page block
-(`$10..$80`) plus three additional rows for the filter-program
-self-modifying operand bytes — labelled `FLTCTRL` / `FLTPOSI` /
-`CWEPCNT`. The latter live in the loaded player code (`$1xxx`)
-and let downstream tools reconstruct SID-Wizard's per-frame filter
-table position + sweep counter, which are NOT in zero page.
+(`$10..$80`) plus six additional rows:
+
+- Three for the filter-program self-modifying operand bytes —
+  labelled `FLTCTRL` / `FLTPOSI` / `CWEPCNT`. These live in the
+  loaded player code (`$1xxx`) and let downstream tools reconstruct
+  SID-Wizard's per-frame filter-table position + sweep counter,
+  which are NOT in zero page.
+- Three for the per-voice DETUNER bytes (`DETUNER_v0` / `v1` / `v2`).
+  DETUNER is in the CONST_VAR ZP region that INIPVAR doesn't clear;
+  its base address varies by build, so it's discovered from the
+  WRPITCH ``adc DETUNER,X`` operand and captured per voice.
 
 ## License
 

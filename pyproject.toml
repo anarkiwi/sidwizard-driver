@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidwizard-driver"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python automation harness for driving SID-Wizard inside asid-vice — captures per-frame SID register writes from the real 6502 player."
 readme = "README.md"
 license = { text = "Apache-2.0" }
