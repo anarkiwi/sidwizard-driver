@@ -22,7 +22,6 @@ from sidwizard_driver.ghost_dump import (
     find_filter_selfmod_addrs,
 )
 
-
 # 18-byte filter-program self-modifying signature placed at known
 # offsets inside a synthetic "player code" block — same byte layout the
 # real SID-Wizard 1.94 single-SID build emits inside FilterProgram. We
@@ -42,15 +41,24 @@ def _make_filter_signature(
     address of CWEPCNT+1 inside the host memory block."""
     return bytes(
         [
-            0xE0, fltctrl_val,        # cpx #imm (FLTCTRL)
-            0xD0, 0x10,               # bne SwUpEnd (dummy +$10)
-            0xA0, fltposi_val,        # ldy #imm (FLTPOSI)
-            0xB1, 0xFB,               # lda (PLAYERZP),y
-            0x30, 0x10,               # bmi NOCWEEP
-            0xC8,                     # iny (FISWEEP)
-            0xC9, cwepcnt_val,        # cmp #imm (CWEPCNT)
-            0xF0, 0x10,               # beq FLADVAN
-            0xEE, inc_target & 0xFF, (inc_target >> 8) & 0xFF,  # inc abs
+            0xE0,
+            fltctrl_val,  # cpx #imm (FLTCTRL)
+            0xD0,
+            0x10,  # bne SwUpEnd (dummy +$10)
+            0xA0,
+            fltposi_val,  # ldy #imm (FLTPOSI)
+            0xB1,
+            0xFB,  # lda (PLAYERZP),y
+            0x30,
+            0x10,  # bmi NOCWEEP
+            0xC8,  # iny (FISWEEP)
+            0xC9,
+            cwepcnt_val,  # cmp #imm (CWEPCNT)
+            0xF0,
+            0x10,  # beq FLADVAN
+            0xEE,
+            inc_target & 0xFF,
+            (inc_target >> 8) & 0xFF,  # inc abs
         ]
     )
 
@@ -68,7 +76,7 @@ def _embed_signature(
     # CWEPCNT operand lives at offset+12 (signature byte 12).
     cwepcnt_addr = base_addr + offset + 12
     sig = _make_filter_signature(inc_target=cwepcnt_addr, **sig_kwargs)
-    block[offset:offset + len(sig)] = sig
+    block[offset : offset + len(sig)] = sig
     return bytes(block)
 
 
@@ -170,7 +178,8 @@ def _make_responder(zp_payload_fn, fltctrl_val, fltposi_val, cwepcnt_val):
     """
     sm_offset = _filter_signature_offset()
     code_block = _embed_signature(
-        SELFMOD_SCAN_START, sm_offset,
+        SELFMOD_SCAN_START,
+        sm_offset,
         fltctrl_val=fltctrl_val,
         fltposi_val=fltposi_val,
         cwepcnt_val=cwepcnt_val,
@@ -240,7 +249,10 @@ def test_dump_loop_halts_at_player_entry_each_frame():
         return bytes((i + frame) & 0xFF for i in range(width))
 
     responder, expected_addrs = _make_responder(
-        zp_payload, fltctrl_val=0x0E, fltposi_val=0x10, cwepcnt_val=0x03,
+        zp_payload,
+        fltctrl_val=0x0E,
+        fltposi_val=0x10,
+        cwepcnt_val=0x03,
     )
     bm = _FakeBinMon(responder)
 
@@ -313,7 +325,9 @@ def test_write_csv_with_selfmod_appends_three_rows_per_frame(tmp_path):
     selfmod_snaps = [bytes([0x0E, 0x10, 0x03]), bytes([0x0E, 0x13, 0x05])]
     out = tmp_path / "ghost-sm.csv"
     rows = _write_csv(
-        snaps, str(out), annotate=True,
+        snaps,
+        str(out),
+        annotate=True,
         selfmod_addrs=selfmod_addrs,
         selfmod_snapshots=selfmod_snaps,
     )
@@ -328,7 +342,7 @@ def test_write_csv_with_selfmod_appends_three_rows_per_frame(tmp_path):
     assert frame0_sm == [
         ["0", "4161", "14", "FLTCTRL"],  # $1041 = 4161
         ["0", "4165", "16", "FLTPOSI"],  # $1045
-        ["0", "4172", "3", "CWEPCNT"],   # $104C
+        ["0", "4172", "3", "CWEPCNT"],  # $104C
     ]
     frame1_start = expected_per_frame
     frame1_sm = body[frame1_start + width : frame1_start + width + 3]
@@ -347,8 +361,11 @@ def test_write_csv_with_selfmod_no_annotate_omits_label(tmp_path):
     selfmod_snaps = [bytes([1, 2, 3])]
     out = tmp_path / "ghost-sm-noannot.csv"
     _write_csv(
-        snaps, str(out), annotate=False,
-        selfmod_addrs=selfmod_addrs, selfmod_snapshots=selfmod_snaps,
+        snaps,
+        str(out),
+        annotate=False,
+        selfmod_addrs=selfmod_addrs,
+        selfmod_snapshots=selfmod_snaps,
     )
     with open(out, newline="") as fp:
         body = list(csv.reader(fp))[1:]

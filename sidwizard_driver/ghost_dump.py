@@ -121,7 +121,7 @@ def find_filter_selfmod_addrs(player_code: bytes, base_addr: int) -> tuple[int, 
     """
     for i in range(len(player_code) - 17):
         if (
-            player_code[i] == 0xE0       # cpx #imm
+            player_code[i] == 0xE0  # cpx #imm
             and player_code[i + 2] == 0xD0  # bne rel
             and player_code[i + 4] == 0xA0  # ldy #imm
             and player_code[i + 6] == 0xB1  # lda (zp),y
@@ -142,9 +142,7 @@ def find_filter_selfmod_addrs(player_code: bytes, base_addr: int) -> tuple[int, 
                     f"computed CWEPCNT address ${cwepcnt:04X}"
                 )
             return fltctrl, fltposi, cwepcnt
-    raise ValueError(
-        "filter-program self-mod signature not found in player code"
-    )
+    raise ValueError("filter-program self-mod signature not found in player code")
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -176,9 +174,7 @@ def _discover_selfmod_addrs(bm: BinMon) -> tuple[int, int, int]:
     ``_dump_loop`` between the first ``run_until_pc`` and the first ZP
     capture).
     """
-    code = bm.mem_get(
-        SELFMOD_SCAN_START, SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1
-    )
+    code = bm.mem_get(SELFMOD_SCAN_START, SELFMOD_SCAN_START + SELFMOD_SCAN_LEN - 1)
     return find_filter_selfmod_addrs(bytes(code), SELFMOD_SCAN_START)
 
 
@@ -212,9 +208,7 @@ def _dump_loop(bm: BinMon, frames: int) -> tuple[
             # Read each self-mod operand byte. They are scattered in
             # $1xxx, so a single mem_get range isn't economical;
             # one read per byte is fine (only runs once per frame).
-            sm_bytes = bytes(
-                bm.mem_get(addr, addr)[0] for addr in selfmod_addrs
-            )
+            sm_bytes = bytes(bm.mem_get(addr, addr)[0] for addr in selfmod_addrs)
         zp_snapshots.append((frame, bytes(zp)))
         selfmod_snapshots.append(sm_bytes)
     return zp_snapshots, selfmod_addrs, selfmod_snapshots
@@ -254,9 +248,7 @@ def _write_csv(
                 rows += 1
             if selfmod_addrs is not None and selfmod_snapshots is not None:
                 sm_bytes = selfmod_snapshots[snap_idx]
-                for addr, val, label in zip(
-                    selfmod_addrs, sm_bytes, SELFMOD_LABELS
-                ):
+                for addr, val, label in zip(selfmod_addrs, sm_bytes, SELFMOD_LABELS, strict=True):
                     row = [frame, addr, val]
                     if annotate:
                         row.append(label)
@@ -329,12 +321,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
                 bm.checkpoint_delete(pre_cp.checknum)
 
                 zp_snapshots, selfmod_addrs, selfmod_snapshots = _dump_loop(
-                    bm, args.frames,
+                    bm,
+                    args.frames,
                 )
                 if selfmod_addrs is not None:
                     log.info(
-                        "filter self-mod addrs: FLTCTRL=$%04X FLTPOSI=$%04X "
-                        "CWEPCNT=$%04X",
+                        "filter self-mod addrs: FLTCTRL=$%04X FLTPOSI=$%04X " "CWEPCNT=$%04X",
                         *selfmod_addrs,
                     )
 
@@ -346,8 +338,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
         return 5
 
     rows = _write_csv(
-        zp_snapshots, args.out, annotate=args.annotate,
-        selfmod_addrs=selfmod_addrs, selfmod_snapshots=selfmod_snapshots,
+        zp_snapshots,
+        args.out,
+        annotate=args.annotate,
+        selfmod_addrs=selfmod_addrs,
+        selfmod_snapshots=selfmod_snapshots,
     )
     print(f"wrote {rows} rows to {args.out} (workdir preserved at {host_work_dir})")
     return 0
