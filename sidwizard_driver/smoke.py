@@ -10,11 +10,17 @@ import argparse
 import logging
 import os
 import sys
+import tempfile
 
 from vice_driver import BinMon, DiskMount, ViceContainer, ViceContainerError
 
 from .fetch import fetch_disk1_d64
 from .sidwizard import Sidwizard, SidwizardError
+
+# anarkiwi/headlessvice's x64sc writes its log to $HOME/.local/state/vice,
+# which doesn't exist in the image; without a writable bind mount here the
+# process exits before binding the binmon port.
+VICE_STATE_DIR = "/root/.local/state/vice"
 
 log = logging.getLogger("sidwizard_driver.smoke")
 
@@ -24,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--d64", default=None, help="SID-Wizard editor .d64 (auto-fetched if omitted)"
     )
-    parser.add_argument("--image", default="asid-vice:latest")
+    parser.add_argument("--image", default="anarkiwi/headlessvice:latest")
     parser.add_argument("--port", type=int, default=6502)
     parser.add_argument("--no-warp", action="store_true")
     parser.add_argument("--idle-timeout", type=float, default=60.0)
@@ -42,14 +48,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     container_d64 = "/tmp/sidwizard.d64"
-    mount = DiskMount(host_path=d64_path, container_path=container_d64, read_only=True)
+    vice_state = tempfile.mkdtemp(prefix="sidwizard-driver-vice-")
+    mounts = [
+        DiskMount(host_path=d64_path, container_path=container_d64, read_only=True),
+        DiskMount(host_path=vice_state, container_path=VICE_STATE_DIR, read_only=False),
+    ]
     container = ViceContainer(
         image=args.image,
+        entrypoint="x64sc",
         binmon_port=args.port,
         autostart=container_d64,
-        mounts=[mount],
+        mounts=mounts,
         warp=not args.no_warp,
-        silent=True,
     )
 
     try:

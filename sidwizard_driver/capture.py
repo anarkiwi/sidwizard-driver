@@ -17,6 +17,9 @@ from .sidwizard import Sidwizard, SidwizardError
 # SWM header: 2-byte PRG load address + 4-byte magic + framespeed byte at +4.
 SWM_FRAMESPEED_OFFSET = 2 + 0x04
 
+# anarkiwi/headlessvice's x64sc needs a writable $HOME/.local/state/vice.
+VICE_STATE_DIR = "/root/.local/state/vice"
+
 
 def _read_swm_framespeed(swm_path: str) -> int:
     with open(swm_path, "rb") as fp:
@@ -45,7 +48,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:  # pragma: no cov
     p.add_argument(
         "--no-dedup", action="store_true", help="don't collapse consecutive duplicate writes"
     )
-    p.add_argument("--image", default="asid-vice:latest")
+    p.add_argument("--image", default="anarkiwi/headlessvice:latest")
     p.add_argument("--port", type=int, default=6502)
     p.add_argument("--idle-timeout", type=float, default=60.0)
     p.add_argument("--load-timeout", type=float, default=10.0)
@@ -105,20 +108,22 @@ def _run_live(args: argparse.Namespace) -> int:  # pragma: no cover - requires l
     container_dump = f"{container_work_dir}/trace.txt"
     host_swm_d64 = os.path.join(host_work_dir, "tune.d64")
     container_swm_d64 = f"{container_work_dir}/tune.d64"
+    host_vice_state = tempfile.mkdtemp(prefix="sidwizard-driver-vice-")
 
     container_d64 = "/tmp/sidwizard-editor.d64"
 
     mounts = [
         DiskMount(host_path=args.d64, container_path=container_d64, read_only=True),
         DiskMount(host_path=host_work_dir, container_path=container_work_dir, read_only=False),
+        DiskMount(host_path=host_vice_state, container_path=VICE_STATE_DIR, read_only=False),
     ]
     container = ViceContainer(
         image=args.image,
+        entrypoint="x64sc",
         binmon_port=args.port,
         autostart=container_d64,
         mounts=mounts,
         warp=True,
-        silent=True,
         sounddev="dump",
         sounddump_path=container_dump,
     )

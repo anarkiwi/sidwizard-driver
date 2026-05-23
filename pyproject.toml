@@ -41,7 +41,7 @@ classifiers = [
     "Topic :: System :: Emulators",
 ]
 dependencies = [
-    "vice-driver>=0.1.0",
+    "vice-driver>=0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -69,7 +69,10 @@ sidwizard_driver = ["fixtures/*.csv"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = ["-ra", "--strict-markers"]
+addopts = ["-ra", "--strict-markers", "-m", "not integration"]
+markers = [
+    "integration: requires Docker and the anarkiwi/headlessvice image (opt-in via -m integration)",
+]
 
 [tool.ruff]
 line-length = 100
