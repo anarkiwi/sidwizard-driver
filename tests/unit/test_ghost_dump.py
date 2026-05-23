@@ -174,18 +174,41 @@ def _filter_signature_offset() -> int:
     return 0x40
 
 
-def _wrpitch_bytes(detuner_zp: int, continuation: int = 0x9D) -> bytes:
-    """``WRPITCH`` opening sequence the discovery scans for::
+def _wrpitch_bytes_zp(detuner_zp: int, continuation: int = 0x9D) -> bytes:
+    """``WRPITCH`` opening sequence in the zp,X variant::
+
+    B5 10           ; lda FREQLO,X
+    75 ??           ; adc DETUNER,X        (?? = DETUNER ZP addr)
+    XX              ; continuation: $9D (sta abs,X) or $08 (php)
+    """
+    return bytes([0xB5, 0x10, 0x75, detuner_zp & 0xFF, continuation])
+
+
+def _wrpitch_bytes_abs(detuner_addr: int, continuation: int = 0x9D) -> bytes:
+    """``WRPITCH`` opening sequence in the abs,X variant — the form
+    SID-Wizard 1.94's compiled editor build emits when DETUNER lives
+    in the player-code area instead of zero page::
 
         B5 10           ; lda FREQLO,X
-        75 ??           ; adc DETUNER,X        (?? = DETUNER ZP addr)
-        9D ?? ??        ; sta SIDG.FREQ+0,X    (or $08 php in editor build)
+        7D LO HI        ; adc DETUNER,X  (abs,X — DETUNER at $LOHI)
+        XX              ; continuation: $9D or $08
+    """
+    return bytes(
+        [
+            0xB5,
+            0x10,
+            0x7D,
+            detuner_addr & 0xFF,
+            (detuner_addr >> 8) & 0xFF,
+            continuation,
+        ]
+    )
 
-    The 5th byte disambiguates from ADDFREQ (which writes back to ZP
-    with $95). Default continuation is $9D (sta abs,X — exported
-    build); pass $08 for the editor + MIDI build (php; clc; adc
-    pitchShiftLo,X follows)."""
-    return bytes([0xB5, 0x10, 0x75, detuner_zp & 0xFF, continuation])
+
+def _wrpitch_bytes(detuner_zp: int, continuation: int = 0x9D) -> bytes:
+    """Backwards-compatible alias for the zp,X variant — kept so the
+    existing ``_make_responder`` setup keeps working without churn."""
+    return _wrpitch_bytes_zp(detuner_zp, continuation)
 
 
 def _addfreq_bytes(freqmod_zp: int = 0x50) -> bytes:
@@ -287,14 +310,35 @@ def test_find_filter_selfmod_addrs_rejects_inc_target_mismatch():
 
 def test_find_detuner_base_addr_recovers_zp_address():
     """``find_detuner_base_addr`` reads the operand byte of WRPITCH's
-    ``adc DETUNER,X`` instruction, which encodes the ZP address of
-    DETUNER_v0."""
+    ``adc DETUNER,X`` instruction (zp,X form), which encodes the ZP
+    address of DETUNER_v0."""
     base = 0x1000
     block = bytearray(0x100)
-    # Drop the WRPITCH signature at offset 0x30.
-    sig = _wrpitch_bytes(detuner_zp=0x7A)
+    sig = _wrpitch_bytes_zp(detuner_zp=0x7A)
     block[0x30 : 0x30 + len(sig)] = sig
     assert find_detuner_base_addr(bytes(block), base) == 0x7A
+
+
+def test_find_detuner_base_addr_recovers_abs_address():
+    """SID-Wizard 1.94's editor build places DETUNER in the player-code
+    area (e.g. ``$1050``) instead of zero page, so WRPITCH uses abs,X
+    addressing (``7D LO HI``). The discovery must read the 16-bit
+    little-endian operand correctly."""
+    base = 0x1010
+    block = bytearray(0x800)
+    sig = _wrpitch_bytes_abs(detuner_addr=0x1050)
+    block[0x100 : 0x100 + len(sig)] = sig
+    assert find_detuner_base_addr(bytes(block), base) == 0x1050
+
+
+def test_find_detuner_base_addr_abs_accepts_php_continuation():
+    """Editor + MIDI build's WRPITCH inserts ``php`` ($08) after the
+    abs,X adc. Discovery must accept either $08 or $9D."""
+    base = 0x1010
+    block = bytearray(0x200)
+    sig = _wrpitch_bytes_abs(detuner_addr=0x1050, continuation=0x08)
+    block[0x80 : 0x80 + len(sig)] = sig
+    assert find_detuner_base_addr(bytes(block), base) == 0x1050
 
 
 def test_find_detuner_base_addr_rejects_low_zp_operand():
