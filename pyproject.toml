@@ -71,7 +71,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = ["-ra", "--strict-markers", "-m", "not integration"]
 markers = [
-    "integration: requires Docker and the anarkiwi/headlessvice image (opt-in via -m integration)",
+    "integration: requires Docker and the anarkiwi/asid-vice image (opt-in via -m integration)",
 ]
 
 [tool.ruff]
