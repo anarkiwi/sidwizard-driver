@@ -112,7 +112,7 @@ def test_parse_args_defaults():
     assert args.out == "out.csv"
     assert args.frames == 60
     assert args.annotate is False
-    assert args.image == "anarkiwi/headlessvice:latest"
+    assert args.image == "anarkiwi/asid-vice:latest"
     assert args.port == 6502
 
 

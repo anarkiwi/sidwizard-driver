@@ -15,7 +15,7 @@ Built on [vice-driver](https://pypi.org/project/vice-driver/).
 pip install sidwizard-driver
 ```
 
-Requires Docker (or compatible) and the `asid-vice:latest` image — see
+Requires Docker (or compatible) and the `anarkiwi/asid-vice:latest` image — see
 [anarkiwi/asid-vice](https://github.com/anarkiwi/asid-vice).
 
 The SID-Wizard editor disk is fetched on demand from CSDB and cached

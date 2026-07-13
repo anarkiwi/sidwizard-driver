@@ -20,7 +20,7 @@ log = logging.getLogger("sidwizard_driver.ghost_dump")
 # Player jump table: $1000=INITER, $1003=PLAYER (per-frame entry).
 PLAYER_ENTRY = 0x1003
 
-# anarkiwi/headlessvice's x64sc needs a writable $HOME/.local/state/vice.
+# anarkiwi/asid-vice's x64sc needs a writable $HOME/.local/state/vice.
 VICE_STATE_DIR = "/root/.local/state/vice"
 
 # Zero-page region covering per-voice ghost-register blocks plus
@@ -228,7 +228,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--frames", type=int, default=60)
     p.add_argument("--out", required=True, help="output CSV path")
     p.add_argument("--annotate", action="store_true", help="add SID-Wizard variable names")
-    p.add_argument("--image", default="anarkiwi/headlessvice:latest")
+    p.add_argument("--image", default="anarkiwi/asid-vice:latest")
     p.add_argument("--port", type=int, default=6502)
     p.add_argument("--idle-timeout", type=float, default=60.0)
     p.add_argument("--load-timeout", type=float, default=10.0)
@@ -405,7 +405,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live VICE
     ]
     container = ViceContainer(
         image=args.image,
-        entrypoint="x64sc",
         binmon_port=args.port,
         autostart=container_d64,
         mounts=mounts,

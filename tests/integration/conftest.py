@@ -1,4 +1,4 @@
-"""Skip-guard for integration tests that need Docker + anarkiwi/headlessvice."""
+"""Skip-guard for integration tests that need Docker + anarkiwi/asid-vice."""
 
 from __future__ import annotations
 

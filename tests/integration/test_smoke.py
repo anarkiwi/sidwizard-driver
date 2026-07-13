@@ -1,8 +1,8 @@
-"""Live integration smoke: boot SID-Wizard inside anarkiwi/headlessvice
+"""Live integration smoke: boot SID-Wizard inside anarkiwi/asid-vice
 and confirm the editor comes up with a discoverable TUNEHEADER.
 
 Opt-in: ``pytest -m integration``. Requires Docker and the
-``anarkiwi/headlessvice:latest`` image (pre-pulled or reachable on the
+``anarkiwi/asid-vice:latest`` image (pre-pulled or reachable on the
 daemon). The SID-Wizard editor disk is fetched on demand and cached
 under ``$XDG_CACHE_HOME/sidwizard-driver/``.
 """
@@ -16,7 +16,7 @@ import pytest
 from sidwizard_driver.fetch import fetch_disk1_d64
 from sidwizard_driver.smoke import main as smoke_main
 
-IMAGE = os.environ.get("SIDWIZARD_VICE_IMAGE", "anarkiwi/headlessvice:latest")
+IMAGE = os.environ.get("SIDWIZARD_VICE_IMAGE", "anarkiwi/asid-vice:latest")
 PORT = int(os.environ.get("SIDWIZARD_BINMON_PORT", "6502"))
 
 
