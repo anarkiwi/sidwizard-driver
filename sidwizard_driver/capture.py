@@ -17,7 +17,7 @@ from .sidwizard import Sidwizard, SidwizardError
 # SWM header: 2-byte PRG load address + 4-byte magic + framespeed byte at +4.
 SWM_FRAMESPEED_OFFSET = 2 + 0x04
 
-# anarkiwi/headlessvice's x64sc needs a writable $HOME/.local/state/vice.
+# anarkiwi/asid-vice's x64sc needs a writable $HOME/.local/state/vice.
 VICE_STATE_DIR = "/root/.local/state/vice"
 
 
@@ -48,7 +48,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:  # pragma: no cov
     p.add_argument(
         "--no-dedup", action="store_true", help="don't collapse consecutive duplicate writes"
     )
-    p.add_argument("--image", default="anarkiwi/headlessvice:latest")
+    p.add_argument("--image", default="anarkiwi/asid-vice:latest")
     p.add_argument("--port", type=int, default=6502)
     p.add_argument("--idle-timeout", type=float, default=60.0)
     p.add_argument("--load-timeout", type=float, default=10.0)
@@ -119,7 +119,6 @@ def _run_live(args: argparse.Namespace) -> int:  # pragma: no cover - requires l
     ]
     container = ViceContainer(
         image=args.image,
-        entrypoint="x64sc",
         binmon_port=args.port,
         autostart=container_d64,
         mounts=mounts,

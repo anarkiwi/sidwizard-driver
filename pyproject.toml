@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidwizard-driver"
-version = "0.4.2"
+version = "0.5.0"
 description = "Python automation harness for driving SID-Wizard inside asid-vice — captures per-frame SID register writes from the real 6502 player."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -41,7 +41,7 @@ classifiers = [
     "Topic :: System :: Emulators",
 ]
 dependencies = [
-    "vice-driver>=0.2.0",
+    "vice-driver>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -71,7 +71,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = ["-ra", "--strict-markers", "-m", "not integration"]
 markers = [
-    "integration: requires Docker and the anarkiwi/headlessvice image (opt-in via -m integration)",
+    "integration: requires Docker and the anarkiwi/asid-vice image (opt-in via -m integration)",
 ]
 
 [tool.ruff]
